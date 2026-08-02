@@ -13,9 +13,8 @@ Skipped automatically when there is no display or no tkinter.
 """
 
 import importlib.util
-import sys
 import tempfile
-import time
+import threading
 import unittest
 from pathlib import Path
 
@@ -75,23 +74,25 @@ class TestGuiBuilds(unittest.TestCase):
 
     def pump(self, action=None, cycles=10):
         def fake_mainloop(root):
-            root.withdraw()
-            for _ in range(cycles):
-                root.update()
-            if action is not None:
-                action(root)
+            try:
+                root.withdraw()
                 for _ in range(cycles):
                     root.update()
-            self.widgets = snapshot(root, [])
-            # The app cancels its drain timer in on_close, which this fake
-            # mainloop bypasses. Clear anything still pending so Tcl does not
-            # fire a callback against a destroyed window.
-            for pending in root.tk.splitlist(root.tk.call("after", "info")):
-                try:
-                    root.after_cancel(pending)
-                except Exception:  # noqa: BLE001 - already fired
-                    pass
-            root.destroy()
+                if action is not None:
+                    action(root)
+                    for _ in range(cycles):
+                        root.update()
+                self.widgets = snapshot(root, [])
+            finally:
+                # Always, even if action blew up: a window left alive with
+                # pending callbacks deadlocks the next test's Tk() on macOS,
+                # which reads as a hung CI job rather than a failed test.
+                for pending in root.tk.splitlist(root.tk.call("after", "info")):
+                    try:
+                        root.after_cancel(pending)
+                    except Exception:  # noqa: BLE001 - already fired
+                        pass
+                root.destroy()
 
         tkinter.Tk.mainloop = fake_mainloop
         self.assertEqual(self.yd.run_gui(), 0)
@@ -162,47 +163,59 @@ class TestGuiBuilds(unittest.TestCase):
         self.assertTrue(self.warnings)
         self.assertIn("链接无效", self.warnings[0][0])
 
-    def test_download_button_streams_yt_dlp_output_into_the_log(self):
-        """The download button must reach run_download and pump its output.
+    def test_download_button_delegates_to_run_download(self):
+        """Two properties at once, both regressions that actually happened.
 
-        The GUI used to carry its own copy of that loop; this covers the path
-        end to end so the copy cannot come back unnoticed.
+        The GUI used to carry its own copy of run_download's loop, and it read
+        the mode/quality/playlist/browser widgets from the worker thread, which
+        Tk forbids -- that raises inside the worker, so run_download is never
+        reached and the log gets an 错误 line instead.
+
+        No real subprocess here on purpose: driving one through Tk's event loop
+        hung for 15 minutes on the macOS CI runner. run_download's own process
+        handling is covered by TestBotCheck in test_downloader.py.
         """
-        marker = "STUB-RAN-OK"
-        stub = Path(tempfile.mkdtemp()) / "stub.py"
-        stub.write_text("print({!r})\n".format(marker), encoding="utf-8")
-        self.yd.find_runner = lambda: [sys.executable, str(stub)]
-        out_dir = tempfile.mkdtemp()
+        done = threading.Event()
         captured = {}
 
-        def widgets_of_class(widget, names, out):
-            if widget.winfo_class() in names:
+        def fake_run_download(url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            done.set()
+            return 0
+
+        self.yd.run_download = fake_run_download
+        self.yd.find_runner = lambda: ["yt-dlp"]
+        out_dir = tempfile.mkdtemp()
+
+        def entries_of(widget, out):
+            if widget.winfo_class() in ("TEntry", "Entry"):
                 out.append(widget)
             for child in widget.winfo_children():
-                widgets_of_class(child, names, out)
+                entries_of(child, out)
             return out
 
         def action(root):
-            entries = widgets_of_class(root, ("TEntry", "Entry"), [])
-            self.assertGreaterEqual(len(entries), 2, "expected a URL and a folder entry")
+            entries = entries_of(root, [])
+            if len(entries) < 2:
+                return
             entries[0].insert(0, "https://youtu.be/ID")
             entries[1].delete(0, "end")
             entries[1].insert(0, out_dir)
             self.click(root, "开始下载")
+            # The handler hands off to a worker thread; wait for it rather than
+            # spinning the event loop, so a failure fails fast instead of hanging.
+            captured["finished"] = done.wait(10)
 
-            log = widgets_of_class(root, ("Text",), [])[0]
-            # The download runs on a worker thread and reaches the log only via
-            # the 120 ms drain timer, so pump until it shows up.
-            deadline = time.time() + 20
-            while time.time() < deadline:
-                root.update()
-                if marker in log.get("1.0", "end"):
-                    break
-                time.sleep(0.05)
-            captured["log"] = log.get("1.0", "end")
+        self.pump(action=action)
 
-        self.pump(action=action, cycles=5)
-        self.assertIn(marker, captured.get("log", ""))
+        self.assertTrue(captured.get("finished"), "run_download was never reached")
+        self.assertEqual(captured["url"], "https://youtu.be/ID")
+        self.assertEqual(captured["kwargs"]["output_dir"], out_dir)
+        for key in ("mode", "quality", "playlist", "cookies_browser"):
+            self.assertIn(key, captured["kwargs"], "widget value never made it through")
+        self.assertEqual(captured["kwargs"]["mode"], "video")
+        self.assertEqual(captured["kwargs"]["quality"], "best")
 
 
 if __name__ == "__main__":
