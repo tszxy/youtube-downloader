@@ -25,6 +25,10 @@ $script:maxLogLines = 2000
 # Set by the output reader when yt-dlp hits YouTube's "Sign in to confirm
 # you're not a bot" (or "... your age") wall; both are fixed by cookies.
 $script:botCheck = $false
+# The running child's stdout/stderr taps and its completion callback; see
+# Update-ToolProcess for why the UI timer owns both rather than .NET events.
+$script:taps = @()
+$script:onExitAction = $null
 
 function Find-Executable([string]$name, [string]$portablePath) {
     if (Test-Path $portablePath) { return $portablePath }
@@ -151,6 +155,88 @@ function Set-Busy([bool]$busy, [string]$status) {
     $statusLabel.Text = $status
 }
 
+function New-OutputTap([System.IO.Stream]$source) {
+    # CopyToAsync is pure .NET, so draining the pipe needs no PowerShell code on
+    # the threadpool thread that finishes it. bufferSize 1 keeps the writer from
+    # holding lines back from the reader.
+    $path = [System.IO.Path]::GetTempFileName()
+    $target = New-Object System.IO.FileStream(
+        $path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::ReadWrite, 1, $true)
+    return [pscustomobject]@{
+        Path    = $path
+        Target  = $target
+        Task    = $source.CopyToAsync($target)
+        Offset  = [long]0
+        Decoder = [System.Text.Encoding]::UTF8.GetDecoder()
+        Partial = ""
+    }
+}
+
+function Read-TapLines($tap) {
+    # Whole lines only; a trailing partial line waits for the next tick. The
+    # decoder carries state, so a UTF-8 sequence split across reads survives.
+    $lines = @()
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            $tap.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite)
+        if ($stream.Length -le $tap.Offset) { return $lines }
+        [void]$stream.Seek($tap.Offset, [System.IO.SeekOrigin]::Begin)
+        $count = [int][Math]::Min(65536, $stream.Length - $tap.Offset)
+        $buffer = New-Object byte[] $count
+        $read = $stream.Read($buffer, 0, $count)
+        $tap.Offset += $read
+        $chars = New-Object char[] ($tap.Decoder.GetCharCount($buffer, 0, $read))
+        [void]$tap.Decoder.GetChars($buffer, 0, $read, $chars, 0)
+        $text = $tap.Partial + (-join $chars)
+        $parts = $text -split '\r?\n'
+        $tap.Partial = $parts[-1]
+        if ($parts.Count -gt 1) { $lines = $parts[0..($parts.Count - 2)] }
+    } catch {
+        # A tick that loses the race with the writer simply retries next time.
+    } finally {
+        if ($stream) { $stream.Dispose() }
+    }
+    return $lines
+}
+
+function Update-ToolProcess {
+    # Driven by the UI timer, so everything here runs on the UI thread with a
+    # runspace available. This replaced add_OutputDataReceived/add_Exited: those
+    # fire on threadpool threads, where a PowerShell scriptblock has no runspace
+    # and the resulting failure closed the whole window on the first click.
+    if (-not $script:taps -or $script:taps.Count -eq 0) { return }
+    foreach ($tap in $script:taps) {
+        foreach ($line in (Read-TapLines $tap)) { Receive-ToolOutput $line }
+    }
+
+    $process = $script:activeProcess
+    if (-not $process -or -not $process.HasExited) { return }
+    foreach ($tap in $script:taps) {
+        if (-not $tap.Task.IsCompleted) { return }
+    }
+
+    foreach ($tap in $script:taps) {
+        foreach ($line in (Read-TapLines $tap)) { Receive-ToolOutput $line }
+        if ($tap.Partial) {
+            Receive-ToolOutput $tap.Partial
+            $tap.Partial = ""
+        }
+        $tap.Target.Dispose()
+        Remove-Item -LiteralPath $tap.Path -Force -ErrorAction SilentlyContinue
+    }
+
+    $exitCode = $process.ExitCode
+    $onExit = $script:onExitAction
+    $script:taps = @()
+    $script:onExitAction = $null
+    $script:activeProcess = $null
+    $process.Dispose()
+    if ($onExit) { & $onExit $exitCode }
+}
+
 function Start-ToolProcess([string]$fileName, [string[]]$arguments, [string]$busyStatus, [scriptblock]$onExit) {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $fileName
@@ -159,19 +245,12 @@ function Start-ToolProcess([string]$fileName, [string[]]$arguments, [string]$bus
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.CreateNoWindow = $true
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $startInfo.StandardOutputEncoding = $utf8NoBom
-    $startInfo.StandardErrorEncoding = $utf8NoBom
+    # yt-dlp is Python, and with its output redirected it would otherwise encode
+    # using the system codepage, turning Chinese video titles into mojibake.
+    $startInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
-    $process.EnableRaisingEvents = $true
-    $process.add_OutputDataReceived({ Receive-ToolOutput $EventArgs.Data })
-    $process.add_ErrorDataReceived({ Receive-ToolOutput $EventArgs.Data })
-    $process.add_Exited({
-        $exitCode = $process.ExitCode
-        $form.BeginInvoke([Action]{ & $onExit $exitCode }) | Out-Null
-    })
 
     Set-Busy $true $busyStatus
     try {
@@ -181,9 +260,13 @@ function Start-ToolProcess([string]$fileName, [string[]]$arguments, [string]$bus
         Add-Log "无法启动 $fileName：$($_.Exception.Message)"
         return $null
     }
+
+    $script:taps = @(
+        (New-OutputTap $process.StandardOutput.BaseStream),
+        (New-OutputTap $process.StandardError.BaseStream)
+    )
+    $script:onExitAction = $onExit
     $script:activeProcess = $process
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
     return $process
 }
 
@@ -324,9 +407,7 @@ $form.Controls.Add($logBox)
 
 # Draining the queue on a timer keeps a playlist's thousands of output lines
 # from marshalling one UI call each, and caps how much the log box retains.
-$logTimer = New-Object System.Windows.Forms.Timer
-$logTimer.Interval = 120
-$logTimer.Add_Tick({
+function Update-LogBox {
     $batch = New-Object System.Text.StringBuilder
     $line = $null
     $count = 0
@@ -346,6 +427,15 @@ $logTimer.Add_Tick({
     $logBox.AppendText($batch.ToString())
     $logBox.SelectionStart = $logBox.TextLength
     $logBox.ScrollToCaret()
+}
+
+$logTimer = New-Object System.Windows.Forms.Timer
+$logTimer.Interval = 120
+$logTimer.Add_Tick({
+    # Order matters: the child's output is queued first, so the status line the
+    # exit callback logs lands after the output it refers to.
+    Update-ToolProcess
+    Update-LogBox
 })
 $logTimer.Start()
 
@@ -447,12 +537,54 @@ $downloadButton.Add_Click({
 $form.Add_FormClosing({
     $logTimer.Stop()
     Stop-ProcessTree $script:activeProcess
+    foreach ($tap in $script:taps) {
+        try { $tap.Target.Dispose() } catch { }
+        Remove-Item -LiteralPath $tap.Path -Force -ErrorAction SilentlyContinue
+    }
 })
 
 if ($SmokeTest) {
-    # Reached only if every control above was constructed without throwing.
+    # Building the form proves nothing about the buttons: every one of them goes
+    # through Start-ToolProcess, and that path taking the window down with it is
+    # exactly what shipped. So run a real child process through the real
+    # plumbing and pump the timer's work by hand.
     $logTimer.Stop()
-    Write-Host "smoke test ok: PowerShell $($PSVersionTable.PSVersion), $($form.Controls.Count) controls"
+    $failures = @()
+    $observed = @{}
+
+    Start-ToolProcess "cmd.exe" @("/c", "echo smoke-line& exit 7") "smoke" {
+        param($exitCode)
+        $observed["exitCode"] = $exitCode
+    } | Out-Null
+
+    $deadline = (Get-Date).AddSeconds(30)
+    while (-not $observed.ContainsKey("exitCode") -and (Get-Date) -lt $deadline) {
+        Update-ToolProcess
+        Update-LogBox
+        Start-Sleep -Milliseconds 50
+    }
+
+    if (-not $observed.ContainsKey("exitCode")) {
+        $failures += "the exit callback never ran (output plumbing is stuck)"
+    } elseif ($observed["exitCode"] -ne 7) {
+        $failures += "exit code was $($observed['exitCode']), expected 7"
+    }
+    if ($logBox.Text -notmatch "smoke-line") {
+        $failures += "child output never reached the log box"
+    }
+    if ($script:activeProcess) {
+        $failures += "the finished process was not released"
+    }
+
+    $script:botCheck = $false
+    Receive-ToolOutput "ERROR: [youtube] ID: Sign in to confirm you are not a bot."
+    if (-not $script:botCheck) { $failures += "the bot-check line was not recognised" }
+
+    if ($failures.Count -gt 0) {
+        $failures | ForEach-Object { Write-Host "smoke test FAILED: $_" -ForegroundColor Red }
+        exit 1
+    }
+    Write-Host "smoke test ok: PowerShell $($PSVersionTable.PSVersion), $($form.Controls.Count) controls, child output and exit code observed"
     $form.Dispose()
     exit 0
 }
