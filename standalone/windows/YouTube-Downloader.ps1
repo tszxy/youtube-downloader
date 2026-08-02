@@ -29,6 +29,16 @@ $script:botCheck = $false
 # Update-ToolProcess for why the UI timer owns both rather than .NET events.
 $script:taps = @()
 $script:onExitAction = $null
+# Strict on purpose: GetString throws on invalid UTF-8 instead of quietly
+# producing U+FFFD, which is what tells ConvertTo-LineText to fall back.
+$script:strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+$script:ansiEncoding = try {
+    [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage)
+} catch {
+    # Encoding.Default is the ANSI codepage on 5.1 but UTF-8 on pwsh 7, so it
+    # is only the last resort.
+    [System.Text.Encoding]::Default
+}
 
 function Find-Executable([string]$name, [string]$portablePath) {
     if (Test-Path $portablePath) { return $portablePath }
@@ -168,14 +178,28 @@ function New-OutputTap([System.IO.Stream]$source) {
         Target  = $target
         Task    = $source.CopyToAsync($target)
         Offset  = [long]0
-        Decoder = [System.Text.Encoding]::UTF8.GetDecoder()
-        Partial = ""
+        Partial = New-Object byte[] 0
+    }
+}
+
+function ConvertTo-LineText([byte[]]$bytes, [int]$index, [int]$count) {
+    if ($count -le 0) { return "" }
+    try {
+        return $script:strictUtf8.GetString($bytes, $index, $count)
+    } catch {
+        # The child ignored the UTF-8 environment it was handed and wrote the
+        # system codepage: a real yt-dlp run turned its own curly quote into
+        # U+FFFD this way. Decoding per line keeps one bad line from
+        # desynchronising the rest.
+        return $script:ansiEncoding.GetString($bytes, $index, $count)
     }
 }
 
 function Read-TapOutput($tap) {
-    # Whole lines only; a trailing partial line waits for the next tick. The
-    # decoder carries state, so a UTF-8 sequence split across reads survives.
+    # Splits on the LF byte and decodes one line at a time. A UTF-8 sequence can
+    # never contain 0x0A, so line boundaries are safe to find before decoding,
+    # and that is what lets a single mis-encoded line fall back on its own.
+    # A trailing partial line stays in the tap until its newline arrives.
     $lines = @()
     $stream = $null
     try {
@@ -188,12 +212,23 @@ function Read-TapOutput($tap) {
         $buffer = New-Object byte[] $count
         $read = $stream.Read($buffer, 0, $count)
         $tap.Offset += $read
-        $chars = New-Object char[] ($tap.Decoder.GetCharCount($buffer, 0, $read))
-        [void]$tap.Decoder.GetChars($buffer, 0, $read, $chars, 0)
-        $text = $tap.Partial + (-join $chars)
-        $parts = $text -split '\r?\n'
-        $tap.Partial = $parts[-1]
-        if ($parts.Count -gt 1) { $lines = $parts[0..($parts.Count - 2)] }
+        if ($read -le 0) { return $lines }
+
+        $combined = New-Object byte[] ($tap.Partial.Length + $read)
+        [System.Buffer]::BlockCopy($tap.Partial, 0, $combined, 0, $tap.Partial.Length)
+        [System.Buffer]::BlockCopy($buffer, 0, $combined, $tap.Partial.Length, $read)
+
+        $start = 0
+        for ($i = 0; $i -lt $combined.Length; $i++) {
+            if ($combined[$i] -ne 0x0A) { continue }
+            $end = $i
+            if ($end -gt $start -and $combined[$end - 1] -eq 0x0D) { $end-- }
+            $lines += (ConvertTo-LineText $combined $start ($end - $start))
+            $start = $i + 1
+        }
+        $rest = New-Object byte[] ($combined.Length - $start)
+        [System.Buffer]::BlockCopy($combined, $start, $rest, 0, $rest.Length)
+        $tap.Partial = $rest
     } catch {
         # A tick that loses the race with the writer retries on the next one,
         # so drop whatever this pass read rather than emitting a partial line.
@@ -222,9 +257,10 @@ function Update-ToolProcess {
 
     foreach ($tap in $script:taps) {
         foreach ($line in (Read-TapOutput $tap)) { Receive-ToolOutput $line }
-        if ($tap.Partial) {
-            Receive-ToolOutput $tap.Partial
-            $tap.Partial = ""
+        if ($tap.Partial.Length -gt 0) {
+            # Last line with no trailing newline.
+            Receive-ToolOutput (ConvertTo-LineText $tap.Partial 0 $tap.Partial.Length)
+            $tap.Partial = New-Object byte[] 0
         }
         $tap.Target.Dispose()
         Remove-Item -LiteralPath $tap.Path -Force -ErrorAction SilentlyContinue
@@ -595,10 +631,23 @@ if ($SmokeTest) {
     # quote. U+2019 is the character yt-dlp actually emits.
     $sample = "标题 title with a curly quote: you" + [char]0x2019 + "re ok"
     $env:YTDL_SMOKE_SAMPLE = $sample
+    # The child also reports PYTHONUTF8 back: Start-ToolProcess sets it through
+    # StartInfo.EnvironmentVariables, and a real yt-dlp run wrote the system
+    # codepage anyway, so whether the variable even arrives is worth knowing.
+    # And it writes one line of raw non-UTF-8 bytes, which must come back
+    # through the ANSI fallback rather than as U+FFFD.
+    $ansiBytes = [byte[]](0x79, 0x6F, 0x75, 0x92, 0x72, 0x65)
+    $ansiExpected = $script:ansiEncoding.GetString($ansiBytes)
     $childScript = Join-Path ([System.IO.Path]::GetTempPath()) "yt-dl-smoke-child.ps1"
     [System.IO.File]::WriteAllText(
         $childScript,
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`r`nWrite-Output `$env:YTDL_SMOKE_SAMPLE`r`n",
+        ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`r`n" +
+         "Write-Output `"PYTHONUTF8=`$env:PYTHONUTF8`"`r`n" +
+         "Write-Output `$env:YTDL_SMOKE_SAMPLE`r`n" +
+         "`$raw = [System.Console]::OpenStandardOutput()`r`n" +
+         "`$bytes = [byte[]](0x79,0x6F,0x75,0x92,0x72,0x65,0x0D,0x0A)`r`n" +
+         "`$raw.Write(`$bytes, 0, `$bytes.Length)`r`n" +
+         "`$raw.Flush()`r`n"),
         (New-Object System.Text.UTF8Encoding($true)))
     $observed.Remove("exitCode")
     Start-ToolProcess "powershell.exe" `
@@ -616,6 +665,16 @@ if ($SmokeTest) {
     if ($logBox.Text -notmatch [regex]::Escape($sample)) {
         $failures += "UTF-8 child output was mangled; log box holds: $($logBox.Text)"
     }
+    if ($logBox.Text -notmatch [regex]::Escape($ansiExpected)) {
+        $failures += "non-UTF-8 line did not fall back to the ANSI codepage"
+    }
+    if ($logBox.Text -match [char]0xFFFD) {
+        $failures += "a replacement character reached the log box"
+    }
+    # Reported, not asserted: it is a diagnosis, and the reader no longer
+    # depends on the answer.
+    $delivered = if ($logBox.Text -match "PYTHONUTF8=1") { "yes" } else { "no" }
+    Write-Host "child environment delivery: PYTHONUTF8 arrived = $delivered"
 
     # This script's own Chinese, curly quotes included, must reach the box whole:
     # a real run appeared to stop at the opening quote of 浏览器登录状态.
