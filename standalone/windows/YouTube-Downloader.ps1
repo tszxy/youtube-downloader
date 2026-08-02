@@ -534,7 +534,7 @@ $downloadButton.Add_Click({
             if ($script:cookieBrowser) {
                 Add-Log "YouTube 仍然要求验证：请确认 $($script:cookieBrowser) 已登录 YouTube（并且已完全退出该浏览器，否则读不到 cookies），或换一个浏览器、稍后再试。"
             } else {
-                Add-Log "YouTube 要求验证你不是机器人。请在“浏览器登录状态”里选择一个已登录 YouTube 的浏览器后重试。"
+                Add-Log "YouTube 要求验证你不是机器人。请在「浏览器登录状态」里选择一个已登录 YouTube 的浏览器后重试。"
             }
         }
     } | Out-Null
@@ -590,11 +590,15 @@ if ($SmokeTest) {
 
     # A child writing UTF-8 must survive the tap, the stateful decoder and the
     # log box intact: a real run showed yt-dlp's curly quote arriving as U+FFFD.
-    $sample = "标题 title with a curly quote: you’re ok"
+    # Assembled from a char code, and handed to the child through the
+    # environment, so neither this file nor the generated one contains a smart
+    # quote. U+2019 is the character yt-dlp actually emits.
+    $sample = "标题 title with a curly quote: you" + [char]0x2019 + "re ok"
+    $env:YTDL_SMOKE_SAMPLE = $sample
     $childScript = Join-Path ([System.IO.Path]::GetTempPath()) "yt-dl-smoke-child.ps1"
     [System.IO.File]::WriteAllText(
         $childScript,
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`r`nWrite-Output `"$sample`"`r`n",
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`r`nWrite-Output `$env:YTDL_SMOKE_SAMPLE`r`n",
         (New-Object System.Text.UTF8Encoding($true)))
     $observed.Remove("exitCode")
     Start-ToolProcess "powershell.exe" `
@@ -615,7 +619,7 @@ if ($SmokeTest) {
 
     # This script's own Chinese, curly quotes included, must reach the box whole:
     # a real run appeared to stop at the opening quote of 浏览器登录状态.
-    $hint = "YouTube 要求验证你不是机器人。请在“浏览器登录状态”里选择一个已登录 YouTube 的浏览器后重试。"
+    $hint = "YouTube 要求验证你不是机器人。请在「浏览器登录状态」里选择一个已登录 YouTube 的浏览器后重试。"
     Add-Log $hint
     Update-LogBox
     if ($logBox.Text -notmatch [regex]::Escape($hint)) {

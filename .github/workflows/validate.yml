@@ -174,6 +174,26 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File standalone\windows\YouTube-Downloader.ps1 -SmokeTest || exit /b 1
           pwsh -NoProfile -File standalone\windows\YouTube-Downloader.ps1 -SmokeTest || exit /b 1
 
+      - name: .ps1 files must not contain smart quotes
+        shell: bash
+        run: |
+          # PowerShell treats U+2018/2019/201C/201D as string delimiters, so a
+          # Chinese message written with them ends at the quote: the bot-check
+          # hint reached users cut off at 请在, with no error anywhere.
+          python3 - <<'PY'
+          import pathlib, sys
+          status = 0
+          for path in sorted(pathlib.Path("standalone/windows").glob("*.ps1")):
+              for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+                  found = [c for c in "‘’“”" if c in line]
+                  if found:
+                      print("::error file={},line={}::{} is a string delimiter to PowerShell".format(
+                          path, number, " ".join(found)))
+                      status = 1
+          print("no smart quotes" if status == 0 else "")
+          sys.exit(status)
+          PY
+
       - name: .ps1 files with Chinese text must carry a UTF-8 BOM
         shell: bash
         run: |
