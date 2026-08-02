@@ -44,6 +44,16 @@ python3 standalone/youtube_downloader.py "https://youtu.be/VIDEO_ID" -o ~/Downlo
 2. 第一次双击 `Install-and-Run.bat` —— 自动下载 yt-dlp 和 FFmpeg 到 `tools\`，校验 SHA-256 后打开界面
 3. 以后双击 `Run-Downloader.bat`
 
+安装时每个下载都应该打印 `checksum ok`。如果看到黄色的
+`no published checksum for ..., skipping verification`，说明校验没做成，
+请提 issue —— 这不是正常输出。手动补验：
+
+```powershell
+cd standalone\windows
+powershell -File Install-Dependencies.ps1 -CheckPublished   # 官方发布的哈希
+(Get-FileHash -Algorithm SHA256 tools\yt-dlp.exe).Hash      # 你下到的哈希
+```
+
 **B. 已经装了 Python**（跨平台版，功能相同）
 
 ```

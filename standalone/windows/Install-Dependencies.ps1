@@ -22,11 +22,15 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $toolsDir = Join-Path $scriptDir "tools"
 
 function Get-ResponseText($content) {
-    # Windows PowerShell 5.1 hands back a byte[] whenever the server does not
-    # declare a text content type, and GitHub serves SHA2-256SUMS as
-    # application/octet-stream. Splitting those bytes as if they were text
-    # matched nothing, so verification silently turned itself off on exactly
-    # the machines this installer exists for. pwsh 7 always returns a string.
+    # Invoke-WebRequest returns a byte[] whenever the server does not declare a
+    # text content type, and GitHub serves SHA2-256SUMS as
+    # application/octet-stream. Splitting those bytes as if they were lines of
+    # text matched nothing, so verification silently turned itself off.
+    #
+    # Measured by -CheckPublished on CI: Windows PowerShell 5.1 and pwsh 7.6
+    # BOTH hand back System.Byte[] here. What differs is the response, not the
+    # edition -- the FFmpeg checksum next to it is served as text/plain and
+    # arrives as a string, which is why only yt-dlp was affected.
     if ($content -is [byte[]]) {
         return [System.Text.Encoding]::UTF8.GetString($content)
     }
@@ -51,8 +55,8 @@ if ($SelfTest) {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($list)
     $failures = @()
     $cases = @(
-        @{ label = "byte[] (Windows PowerShell 5.1)"; content = $bytes },
-        @{ label = "string (pwsh 7)"; content = $list },
+        @{ label = "byte[] (application/octet-stream, e.g. SHA2-256SUMS)"; content = $bytes },
+        @{ label = "string (text/plain, e.g. the FFmpeg .sha256)"; content = $list },
         @{ label = "CRLF line endings"; content = $crlf }
     )
     foreach ($case in $cases) {

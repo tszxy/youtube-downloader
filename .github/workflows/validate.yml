@@ -143,11 +143,11 @@ jobs:
           }
           Write-Host "clean"
 
-      # The installer parses GitHub's SHA2-256SUMS, which is served as
-      # application/octet-stream. Windows PowerShell 5.1 returns that as a
-      # byte[] and pwsh 7 returns a string, so the parsing has to be exercised
-      # under both -- 5.1 is what the double-click path actually uses, and it
-      # is the edition CI never ran until this test existed.
+      # The installer parses GitHub's SHA2-256SUMS, which arrives as a byte[]
+      # rather than a string. Run under both editions because 5.1 is what the
+      # double-click path uses and pwsh 7 is what a developer would try -- but
+      # note the real gap was that CI linted these scripts without ever running
+      # them, which is what let a silently-skipped checksum ship.
       - name: Installer checksum parsing (Windows PowerShell 5.1)
         shell: powershell
         run: ./standalone/windows/Install-Dependencies.ps1 -SelfTest
