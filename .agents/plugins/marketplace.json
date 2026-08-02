@@ -1,0 +1,20 @@
+{
+  "name": "youtube-dl-marketplace",
+  "interface": {
+    "displayName": "YouTube DL Marketplace"
+  },
+  "plugins": [
+    {
+      "name": "youtube-dl",
+      "source": {
+        "source": "local",
+        "path": "./plugins/youtube-dl"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "YouTube 下载器"
+  short_description: "下载 YouTube 视频、音频、字幕及播放列表内容"
+  default_prompt: "使用 $download-youtube 下载这个 YouTube 链接，并保存为最佳兼容格式。"

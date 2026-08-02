@@ -1,0 +1,18 @@
+{
+  "name": "youtube-dl",
+  "version": "0.1.0",
+  "description": "Download YouTube videos, audio, subtitles, and playlists with yt-dlp.",
+  "author": {
+    "name": "tszxy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "YouTube 下载器",
+    "shortDescription": "下载视频、音频、字幕和播放列表。",
+    "longDescription": "使用 yt-dlp 下载 YouTube 内容，支持最佳兼容视频、纯音频、字幕、播放列表和浏览器登录态。",
+    "developerName": "tszxy",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "下载这个 YouTube 链接并保存到工作目录。"
+  }
+}
