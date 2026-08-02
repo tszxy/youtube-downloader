@@ -173,7 +173,7 @@ function New-OutputTap([System.IO.Stream]$source) {
     }
 }
 
-function Read-TapLines($tap) {
+function Read-TapOutput($tap) {
     # Whole lines only; a trailing partial line waits for the next tick. The
     # decoder carries state, so a UTF-8 sequence split across reads survives.
     $lines = @()
@@ -195,7 +195,9 @@ function Read-TapLines($tap) {
         $tap.Partial = $parts[-1]
         if ($parts.Count -gt 1) { $lines = $parts[0..($parts.Count - 2)] }
     } catch {
-        # A tick that loses the race with the writer simply retries next time.
+        # A tick that loses the race with the writer retries on the next one,
+        # so drop whatever this pass read rather than emitting a partial line.
+        $lines = @()
     } finally {
         if ($stream) { $stream.Dispose() }
     }
@@ -209,7 +211,7 @@ function Update-ToolProcess {
     # and the resulting failure closed the whole window on the first click.
     if (-not $script:taps -or $script:taps.Count -eq 0) { return }
     foreach ($tap in $script:taps) {
-        foreach ($line in (Read-TapLines $tap)) { Receive-ToolOutput $line }
+        foreach ($line in (Read-TapOutput $tap)) { Receive-ToolOutput $line }
     }
 
     $process = $script:activeProcess
@@ -219,7 +221,7 @@ function Update-ToolProcess {
     }
 
     foreach ($tap in $script:taps) {
-        foreach ($line in (Read-TapLines $tap)) { Receive-ToolOutput $line }
+        foreach ($line in (Read-TapOutput $tap)) { Receive-ToolOutput $line }
         if ($tap.Partial) {
             Receive-ToolOutput $tap.Partial
             $tap.Partial = ""
@@ -538,7 +540,9 @@ $form.Add_FormClosing({
     $logTimer.Stop()
     Stop-ProcessTree $script:activeProcess
     foreach ($tap in $script:taps) {
-        try { $tap.Target.Dispose() } catch { }
+        # Best effort: the window is going away, and a temp file left behind is
+        # not worth blocking the close over.
+        try { $tap.Target.Dispose() } catch { Write-Verbose $_.Exception.Message }
         Remove-Item -LiteralPath $tap.Path -Force -ErrorAction SilentlyContinue
     }
 })
