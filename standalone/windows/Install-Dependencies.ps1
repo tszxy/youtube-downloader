@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
-    [switch]$Force
+    [switch]$Force,
+    # Exercises the pure helpers below and exits, without touching the network
+    # or writing anything. CI runs it under both PowerShell editions, which is
+    # the only way to catch the byte[] behaviour described in Get-ResponseText.
+    [switch]$SelfTest
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,11 +16,65 @@ $ProgressPreference = "SilentlyContinue"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $toolsDir = Join-Path $scriptDir "tools"
+
+function Get-ResponseText($content) {
+    # Windows PowerShell 5.1 hands back a byte[] whenever the server does not
+    # declare a text content type, and GitHub serves SHA2-256SUMS as
+    # application/octet-stream. Splitting those bytes as if they were text
+    # matched nothing, so verification silently turned itself off on exactly
+    # the machines this installer exists for. pwsh 7 always returns a string.
+    if ($content -is [byte[]]) {
+        return [System.Text.Encoding]::UTF8.GetString($content)
+    }
+    return [string]$content
+}
+
+function Get-PublishedChecksum([string]$text, [string]$fileName) {
+    # Exact name match, mirroring the Python implementation: yt-dlp.exe,
+    # yt-dlp_x86.exe and yt-dlp_arm64.exe all live in the same list.
+    if (-not $text) { return $null }
+    foreach ($line in ($text -split '\r?\n')) {
+        $parts = $line.Trim() -split '\s+'
+        if ($parts.Count -eq 2 -and $parts[1] -eq $fileName) { return $parts[0] }
+    }
+    return $null
+}
+
+if ($SelfTest) {
+    $list = "aaa  yt-dlp`nbbb  yt-dlp.exe`nccc  yt-dlp_x86.exe`n"
+    # Precomputed: a comma inside a hashtable value is ambiguous to the parser.
+    $crlf = $list -replace "`n", "`r`n"
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($list)
+    $failures = @()
+    $cases = @(
+        @{ label = "byte[] (Windows PowerShell 5.1)"; content = $bytes },
+        @{ label = "string (pwsh 7)"; content = $list },
+        @{ label = "CRLF line endings"; content = $crlf }
+    )
+    foreach ($case in $cases) {
+        $found = Get-PublishedChecksum (Get-ResponseText $case.content) "yt-dlp.exe"
+        if ($found -ne "bbb") {
+            $failures += "$($case.label): expected bbb, got '$found'"
+        }
+    }
+    if (Get-PublishedChecksum (Get-ResponseText $list) "yt-dlp_arm64.exe") {
+        $failures += "matched a name that is not in the list"
+    }
+    if ($failures.Count -gt 0) {
+        # Write-Host, not Write-Error: $ErrorActionPreference is Stop, so the
+        # first Write-Error would hide the remaining failures.
+        $failures | ForEach-Object { Write-Host "self-test FAILED: $_" -ForegroundColor Red }
+        exit 1
+    }
+    Write-Host "self-test ok"
+    exit 0
+}
+
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
 
 function Get-RemoteText([string]$uri) {
     try {
-        return (Invoke-WebRequest -UseBasicParsing -Uri $uri).Content
+        return Get-ResponseText (Invoke-WebRequest -UseBasicParsing -Uri $uri).Content
     } catch {
         Write-Host "Could not fetch $uri ($($_.Exception.Message))" -ForegroundColor Yellow
         return $null
@@ -42,12 +100,8 @@ Invoke-WebRequest -UseBasicParsing `
     -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
     -OutFile $ytDlpPath
 
-$expectedYtDlp = $null
 $sums = Get-RemoteText "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
-if ($sums) {
-    $line = $sums -split "`n" | Where-Object { $_ -match '\s+yt-dlp\.exe\s*$' } | Select-Object -First 1
-    if ($line) { $expectedYtDlp = ($line.Trim() -split '\s+')[0] }
-}
+$expectedYtDlp = Get-PublishedChecksum $sums "yt-dlp.exe"
 Assert-Checksum $ytDlpPath $expectedYtDlp "yt-dlp.exe"
 
 $extractPath = Join-Path $toolsDir "ffmpeg"
