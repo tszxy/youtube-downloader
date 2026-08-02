@@ -62,6 +62,10 @@ standalone\Run-Windows.bat
 
 如果 Windows 拦下 `.bat`：右键 → 属性 → 勾选"解除锁定"。
 
+> 第一次下载多半会撞上 `Sign in to confirm you're not a bot`。
+> 解决办法是在「浏览器登录状态」里选 Chrome，**并且先彻底退出 Chrome 进程**——
+> 关窗口不算。详见[下面这一节](#遇到-sign-in-to-confirm-youre-not-a-bot)。
+
 ### Linux
 
 ```bash
@@ -109,16 +113,77 @@ python3 $P "https://youtu.be/ID" --cookies-from-browser chrome
 
 下载突然失败时，第一件事是升级 yt-dlp——YouTube 经常改接口。
 
-### 遇到 "Sign in to confirm you're not a bot"
+## 遇到 "Sign in to confirm you're not a bot"
 
-YouTube 对部分 IP 会要求验证。下载因此失败时，工具会在日志末尾直接把解决办法打出来。
-加上浏览器登录状态即可：
+这是最常见的失败，日志长这样：
+
+```
+ERROR: [youtube] XXXXXXXXXXX: Sign in to confirm you're not a bot.
+Use --cookies-from-browser or --cookies for the authentication.
+下载失败，退出代码：1
+```
+
+**这不是程序出错**，是 YouTube 认为请求来自机器人，要求你证明是登录用户。家庭宽带、
+公司网络、云主机、VPN 出口都可能触发，同一个链接在另一台机器上往往就没事。
+下载因此失败时，工具会在日志最后一行直接把解决办法打出来。
+
+办法是借用浏览器里已登录的身份：
+
+- **图形界面**：「浏览器登录状态」下拉框选 Chrome（默认是「不使用」），再点开始下载
+- **命令行**：加 `--cookies-from-browser chrome`
 
 ```bash
 python3 standalone/youtube_downloader.py "URL" --cookies-from-browser chrome
 ```
 
-读取 cookie 前请**完全退出浏览器**（macOS 上是 Cmd+Q，不是关窗口），否则数据库被锁。
+可选值：`chrome` / `edge` / `firefox` / `brave` / `safari` / `chromium` / `opera` / `vivaldi`。
+
+### 前提一：那个浏览器里确实登录了 YouTube
+
+打开 youtube.com 看右上角是不是你的头像。没登录的话，读到的 cookies 是匿名的，
+和不加这个选项没区别。
+
+### 前提二：必须彻底退出浏览器进程（最容易卡住的一步）
+
+Chrome 运行时会独占 cookies 数据库，yt-dlp 读不到。**关掉所有窗口不等于退出**——
+Chrome 默认还会在后台常驻。
+
+**Windows：**
+
+1. 关掉所有 Chrome 窗口
+2. 看**任务栏右下角的托盘区**（可能要点那个 `^` 展开）：有 Chrome 图标就右键 → 退出
+3. 打开**任务管理器**（`Ctrl+Shift+Esc`），在「进程」里搜 `chrome`，
+   还有残留就选中 → 结束任务
+
+命令行一步到位：
+
+```powershell
+taskkill /IM chrome.exe /F
+```
+
+想根治，把这个后台常驻关掉：Chrome → 设置 → 系统 →
+**关闭「Google Chrome 关闭时继续运行后台应用」**。关掉之后，关窗口就是真退出。
+
+**macOS：** `Cmd+Q` 退出，不是点窗口左上角的红叉。菜单栏还有 Chrome 图标就是没退。
+
+**Linux：** 同样确认没有残留进程，`pkill chrome` 即可。
+
+### 前提三：换个浏览器往往更省事
+
+**Firefox 通常不需要退出**就能读到 cookies，是最省心的选择。
+Windows 上 Edge 和 Chrome 的行为一样，也要彻底退出。
+
+### 还是不行
+
+- 隔几分钟或换个网络再试，机器人校验有时是临时的
+- 升级 yt-dlp：`Install-and-Run.bat` 会重下最新版；macOS/Linux 用 `brew upgrade yt-dlp` 或 `pipx upgrade yt-dlp`
+- 确认系统时间正确，时间偏差会让 cookies 失效
+
+### 安全提醒
+
+cookies 等同于你的登录凭证。这个工具只是把它交给 yt-dlp 用于本次下载，不会保存、
+不会上传。但请不要把 `--cookies-from-browser` 用在别人的机器上，也不要把导出的
+cookies 文件发给任何人——拿到它就等于拿到你的 YouTube 账号。
 
 ## 项目结构
 
