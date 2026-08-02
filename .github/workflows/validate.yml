@@ -1,0 +1,207 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    timeout-minutes: 15
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 3.8 is the floor: macOS ships 3.9, and nothing here needs newer syntax.
+        python: ["3.8", "3.13"]
+        exclude:
+          - os: macos-latest
+            python: "3.8"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile
+        run: python -m compileall -q standalone/youtube_downloader.py
+      - name: Unit tests
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+
+  end-to-end:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download a real video with a local yt-dlp stub
+        run: |
+          # A stub keeps the test hermetic: no network, no YouTube bot checks.
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/yt-dlp" <<'EOF'
+          #!/usr/bin/env python3
+          import sys, pathlib, re
+          args = sys.argv[1:]
+          template = args[args.index("--output") + 1]
+          target = pathlib.Path(re.sub(r"%\(.*", "stub-video.mp4", template))
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_bytes(b"fake mp4")
+          print("[download] 100% of 8.00B")
+          print("[download] Destination:", target)
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/yt-dlp"
+          printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/bin/ffmpeg"
+          chmod +x "$RUNNER_TEMP/bin/ffmpeg"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+
+          out="$RUNNER_TEMP/downloads"
+          python3 standalone/youtube_downloader.py "https://youtu.be/ID" -o "$out"
+          test -f "$out/stub-video.mp4" || { echo "no file was produced"; exit 1; }
+          echo "end-to-end ok: $(ls -l "$out")"
+
+      - name: Every entry point produces the same command
+        run: |
+          a=$(python3 standalone/youtube_downloader.py "https://youtu.be/ID" --mode audio -o /tmp/d --print-command)
+          b=$(./standalone/unix/youtube-downloader.sh "https://youtu.be/ID" audio /tmp/d best --print-command)
+          c=$(./plugins/youtube-dl/skills/download-youtube/scripts/download_youtube.sh \
+                --url "https://youtu.be/ID" --mode audio --output-dir /tmp/d --print-command)
+          [ "$a" = "$b" ] || { echo "unix wrapper differs"; diff <(echo "$a") <(echo "$b"); exit 1; }
+          [ "$a" = "$c" ] || { echo "plugin shim differs"; diff <(echo "$a") <(echo "$c"); exit 1; }
+          echo "all entry points agree"
+
+      - name: standalone/ works without the rest of the repo
+        run: |
+          isolated="$RUNNER_TEMP/isolated"
+          mkdir -p "$isolated"
+          cp -R standalone "$isolated/"
+          rm -rf "$isolated/standalone/tools" "$isolated/standalone/windows/tools"
+          python3 "$isolated/standalone/youtube_downloader.py" "https://youtu.be/ID" --print-command > /dev/null
+          "$isolated/standalone/unix/youtube-downloader.sh" "https://youtu.be/ID" video /tmp/d best --print-command > /dev/null
+          "$isolated/standalone/run-linux.sh" "https://youtu.be/ID" --print-command > /dev/null
+          echo "standalone/ is self-contained"
+
+  shell:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck standalone/unix/youtube-downloader.sh \
+                     standalone/run-linux.sh \
+                     plugins/youtube-dl/skills/download-youtube/scripts/download_youtube.sh \
+                     tests/compare_implementations.sh
+      - name: Scripts are executable
+        run: |
+          status=0
+          for script in standalone/youtube_downloader.py \
+                        standalone/unix/youtube-downloader.sh \
+                        standalone/run-linux.sh \
+                        standalone/Run-macOS.command \
+                        plugins/youtube-dl/skills/download-youtube/scripts/download_youtube.sh \
+                        tests/compare_implementations.sh; do
+            if [ ! -x "$script" ]; then
+              echo "::error file=$script::missing executable bit (git update-index --chmod=+x $script)"
+              status=1
+            fi
+          done
+          exit $status
+
+  powershell:
+    timeout-minutes: 15
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem standalone/windows -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object {
+                Write-Error "$($_.Extent.File):$($_.Extent.StartLineNumber) $($_.Message)"
+              }
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          $results = Invoke-ScriptAnalyzer -Path standalone/windows -Recurse -Severity Error, Warning `
+            -ExcludeRule PSAvoidUsingWriteHost, PSUseShouldProcessForStateChangingFunctions
+          if ($results) {
+            $results | Format-Table -AutoSize | Out-String | Write-Host
+            exit 1
+          }
+          Write-Host "clean"
+
+      - name: .ps1 files with Chinese text must carry a UTF-8 BOM
+        shell: bash
+        run: |
+          # Windows PowerShell 5.1 decodes BOM-less .ps1 with the system ANSI
+          # codepage, which turns every Chinese UI string into mojibake.
+          python3 - <<'PY'
+          import pathlib, sys
+          status = 0
+          for path in sorted(pathlib.Path("standalone/windows").glob("*.ps1")):
+              raw = path.read_bytes()
+              if any(b > 127 for b in raw) and not raw.startswith(b"\xef\xbb\xbf"):
+                  print("::error file={}::non-ASCII text without a UTF-8 BOM".format(path))
+                  status = 1
+              else:
+                  print("ok:", path)
+          sys.exit(status)
+          PY
+
+  implementations-agree:
+    # The PowerShell GUI exists only so Windows users without Python can
+    # double-click something. It must never disagree with the Python version.
+    timeout-minutes: 15
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compare generated yt-dlp arguments
+        shell: bash
+        run: PYTHON=python ./tests/compare_implementations.sh pwsh
+
+  manifests:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate JSON, YAML and the skill frontmatter
+        run: |
+          python3 -m json.tool .agents/plugins/marketplace.json > /dev/null
+          python3 -m json.tool plugins/youtube-dl/.codex-plugin/plugin.json > /dev/null
+          python3 -c "import yaml; yaml.safe_load(open('plugins/youtube-dl/skills/download-youtube/agents/openai.yaml'))"
+          python3 - <<'PY'
+          import json, pathlib
+
+          root = pathlib.Path(".")
+          plugin = json.loads((root / "plugins/youtube-dl/.codex-plugin/plugin.json").read_text())
+          skills = (root / "plugins/youtube-dl" / plugin["skills"]).resolve()
+          assert skills.is_dir(), "plugin.json skills path missing: {}".format(skills)
+
+          market = json.loads((root / ".agents/plugins/marketplace.json").read_text())
+          for entry in market["plugins"]:
+              assert (root / entry["source"]["path"]).resolve().is_dir(), entry
+
+          skill = (skills / "download-youtube/SKILL.md").read_text()
+          assert skill.startswith("---\n"), "SKILL.md has no frontmatter"
+          frontmatter = skill.split("---\n")[1]
+          for key in ("name:", "description:"):
+              assert key in frontmatter, "SKILL.md frontmatter missing " + key
+
+          print("manifests ok")
+          PY

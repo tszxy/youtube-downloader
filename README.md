@@ -1,234 +1,158 @@
-# YouTube DL for Codex
+# YouTube 下载器
 
-一个基于 [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) 的 Codex 插件。向 Codex 发送 YouTube 链接，即可下载视频、提取 MP3、获取字幕或下载播放列表。
+基于 [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) 的独立下载器：视频、MP3、字幕、播放列表。
+
+**不需要 Codex**。`standalone/` 目录可以单独拷出来使用，不依赖本仓库其他任何东西。
+仓库里另外附带一个可选的 Codex 插件，是对同一个下载器的封装。
 
 ## 功能
 
-- 最佳兼容画质视频，优先合并为 MP4
-- 最佳音质转 MP3
-- 中文及英文人工字幕和自动字幕，转换为 SRT
-- YouTube Shorts 和播放列表
-- 可选读取本机 Chrome 登录状态
+- 视频合并为 MP4，可限制 1080p / 720p / 480p
+- 音频提取为 MP3
+- 中英文人工字幕和自动字幕，转换为 SRT
+- YouTube Shorts、播放列表
+- 可选读取浏览器登录状态（Chrome / Edge / Firefox / Brave / Safari 等）
+- 分片并发下载，明显快于串行
 - 默认不覆盖已有文件
+- 取消时连同 ffmpeg 子进程一起结束，不留孤儿进程
 
-## 系统要求
-
-必须具备：
-
-- Codex 桌面版或支持本地插件的 Codex CLI
-- `yt-dlp`
-- `ffmpeg`：合并视频音频、转 MP3、转换字幕时需要
-- Bash：macOS/Linux 自带；Windows 推荐 Git Bash 或 WSL
-- 网络可以访问 YouTube
-
-建议使用当前稳定版本的 `yt-dlp` 和 `ffmpeg`。YouTube 经常调整接口；下载突然失败时，首先升级 `yt-dlp`。
-
-## 安装依赖
+## 快速开始
 
 ### macOS
 
 ```bash
-brew install yt-dlp ffmpeg
-yt-dlp --version
-ffmpeg -version
+brew install yt-dlp ffmpeg          # 依赖
+cd standalone
+./Run-macOS.command                 # 图形界面（也可在访达里双击）
 ```
+
+命令行：
+
+```bash
+python3 standalone/youtube_downloader.py "https://youtu.be/VIDEO_ID" -o ~/Downloads
+```
+
+> 首次双击 `.command` 时 macOS 可能拦截：右键 → 打开 → 确认一次即可。
 
 ### Windows
 
-使用 Windows Package Manager：
+两种方式，任选其一。
 
-```powershell
-winget install yt-dlp.yt-dlp
-winget install Gyan.FFmpeg
+**A. 不需要装任何东西**（PowerShell 图形版）
+
+1. 打开 `standalone\windows\`
+2. 第一次双击 `Install-and-Run.bat` —— 自动下载 yt-dlp 和 FFmpeg 到 `tools\`，校验 SHA-256 后打开界面
+3. 以后双击 `Run-Downloader.bat`
+
+**B. 已经装了 Python**（跨平台版，功能相同）
+
+```
+standalone\Run-Windows.bat
 ```
 
-关闭并重新打开终端，然后验证：
+如果 Windows 拦下 `.bat`：右键 → 属性 → 勾选"解除锁定"。
 
-```powershell
-yt-dlp --version
-ffmpeg -version
-```
-
-脚本是 Bash 脚本；请在 Git Bash 或 WSL 中运行。通过 Codex 使用时，也需要系统存在可用的 Bash 环境。
-
-### Ubuntu/Debian Linux
-
-发行版仓库中的 `yt-dlp` 可能较旧，推荐使用 `pipx`：
+### Linux
 
 ```bash
-sudo apt update
-sudo apt install -y ffmpeg pipx
-pipx install yt-dlp
-pipx ensurepath
+sudo apt install ffmpeg python3-tk   # tkinter 用于图形界面
+pipx install yt-dlp                  # 发行版自带的 yt-dlp 往往过旧
+cd standalone
+./run-linux.sh                       # 图形界面
+./run-linux.sh "https://youtu.be/VIDEO_ID" -o ~/Downloads   # 命令行
 ```
 
-重新打开终端后验证：
+## 命令行参数
+
+```
+python3 standalone/youtube_downloader.py URL [选项]
+
+  -m, --mode video|audio|subtitles   下载类型（默认 video）
+  -q, --quality best|1080|720|480    画质上限（默认 best）
+  -o, --output-dir DIR               保存目录（默认当前目录）
+      --playlist                     下载整个播放列表
+      --cookies-from-browser NAME    使用浏览器登录状态
+      --install                      下载便携版 yt-dlp 到 tools/
+      --print-command                只打印将要执行的参数，不下载
+```
+
+例子：
 
 ```bash
-yt-dlp --version
-ffmpeg -version
+P=standalone/youtube_downloader.py
+python3 $P "https://youtu.be/ID" --mode audio -o ~/Music
+python3 $P "https://youtu.be/ID" --quality 720
+python3 $P "https://youtu.be/PLAYLIST_URL" --playlist
+python3 $P "https://youtu.be/ID" --cookies-from-browser chrome
 ```
 
-也可以按照 yt-dlp 官方文档选择其他安装方式。
+`--quality` 是**上限**不是精确匹配：填 1080 而视频只有 720p 时，下 720p，不会失败。
 
-## 安装 Codex 插件
+## 依赖
 
-克隆仓库：
+| 依赖 | 用途 | 缺失时 |
+|---|---|---|
+| Python 3.8+ | 跨平台版本体 | Windows 可改用 PowerShell 版，无需 Python |
+| tkinter | 图形界面 | 命令行仍可用；Linux 装 `python3-tk` |
+| yt-dlp | 下载 | 运行 `--install` 自动获取，或 brew / pipx 安装 |
+| ffmpeg | 合并 MP4、转 MP3、转字幕 | 会明确警告；纯单流下载仍可用 |
+
+下载突然失败时，第一件事是升级 yt-dlp——YouTube 经常改接口。
+
+### 遇到 "Sign in to confirm you're not a bot"
+
+YouTube 对部分 IP 会要求验证。加上浏览器登录状态即可：
 
 ```bash
-git clone https://github.com/tszxy/youtube-dl-codex-plugin.git
-cd youtube-dl-codex-plugin
+python3 standalone/youtube_downloader.py "URL" --cookies-from-browser chrome
 ```
 
-添加 Marketplace 并安装插件：
+读取 cookie 前请**完全退出浏览器**（macOS 上是 Cmd+Q，不是关窗口），否则数据库被锁。
+
+## 项目结构
+
+```
+standalone/
+  youtube_downloader.py      唯一的实现：GUI + CLI，所有 yt-dlp 参数在此定义
+  Run-macOS.command          macOS 双击启动
+  Run-Windows.bat            Windows 双击启动（需 Python）
+  run-linux.sh               Linux 启动
+  unix/youtube-downloader.sh 旧的位置参数接口，转发给上面的 Python
+  windows/                   PowerShell 图形版，供没有 Python 的 Windows 使用
+plugins/                     可选的 Codex 插件，同样转发给 standalone/
+tests/                       单元测试 + 两份实现的等价性验证
+```
+
+只有两处会构造 yt-dlp 命令：`youtube_downloader.py` 的 `build_command()` 和
+PowerShell 版的 `Build-YtDlpArgumentList`。后者存在的唯一理由是让没装 Python 的
+Windows 用户也能双击运行。`tests/compare_implementations.sh` 在 CI 中逐场景比对
+两者生成的参数，任何不一致都会让构建失败。
+
+## 测试
+
+```bash
+python3 -m unittest discover -s tests -v     # 29 个测试（含 GUI 冒烟测试）
+./tests/compare_implementations.sh pwsh      # 两份实现的等价性（需要 pwsh）
+```
+
+## 可选：作为 Codex 插件使用
 
 ```bash
 codex plugin marketplace add "$PWD"
 codex plugin add youtube-dl@youtube-dl-marketplace
+codex plugin list        # 应显示 installed, enabled
 ```
 
-验证：
-
-```bash
-codex plugin list
-```
-
-应看到 `youtube-dl@youtube-dl-marketplace` 为 `installed, enabled`。安装或升级后，请新建一个 Codex 任务，使技能被重新加载。
-
-如果命令提示 Marketplace 已存在，可以先查看现有配置，不必重复添加；直接运行插件安装命令即可。
-
-## 在 Codex 中使用
-
-直接发送自然语言：
+装好后新建一个 Codex 任务让技能加载，然后直接说：
 
 ```text
-下载这个视频：https://www.youtube.com/watch?v=VIDEO_ID
-把这个视频下载成 MP3：https://youtu.be/VIDEO_ID
-下载这个视频的中英文字幕：https://youtu.be/VIDEO_ID
-下载整个播放列表：https://www.youtube.com/playlist?list=PLAYLIST_ID
-我已在 Chrome 登录，请使用登录状态下载：https://youtu.be/VIDEO_ID
+下载这个视频：https://youtu.be/VIDEO_ID
+把这个下载成 MP3：https://youtu.be/VIDEO_ID
+下 720p 就行：https://youtu.be/VIDEO_ID
 ```
 
-也可以显式调用技能：
+不想要插件的话，删掉 `plugins/` 和 `.agents/` 即可，`standalone/` 不受影响。
 
-```text
-使用 $download-youtube 下载这个链接，并保存为最高画质 MP4。
-```
+## 许可
 
-默认保存到当前 Codex 工作目录。可以在提示词中指定其他目录。
-
-## 直接运行脚本
-
-```bash
-SCRIPT="plugins/youtube-dl/skills/download-youtube/scripts/download_youtube.sh"
-
-"$SCRIPT" --url "https://youtu.be/VIDEO_ID" --output-dir ./downloads --mode video
-"$SCRIPT" --url "https://youtu.be/VIDEO_ID" --output-dir ./downloads --mode audio
-"$SCRIPT" --url "https://youtu.be/VIDEO_ID" --output-dir ./downloads --mode subtitles
-```
-
-下载完整播放列表：
-
-```bash
-"$SCRIPT" --url "PLAYLIST_URL" --output-dir ./downloads --mode video --playlist
-```
-
-默认只下载单个视频，即使 URL 中包含播放列表参数。
-
-## 使用 Chrome 登录状态
-
-仅在年龄限制、会员内容或需要账号验证时使用：
-
-```bash
-"$SCRIPT" --url "VIDEO_URL" --output-dir ./downloads --mode video --cookies-from-browser chrome
-```
-
-要求：
-
-- 必须在执行下载的同一台机器上登录 Chrome。
-- Codex/终端进程必须有权限读取 Chrome 配置目录。
-- macOS 可能弹出“钥匙串”访问请求，需要允许。
-- Windows/Linux 的 Chrome 用户数据目录必须可被当前用户读取。
-- Chrome Cookie 不会上传到本插件或 GitHub；它仅由本机 `yt-dlp` 读取。
-- 不要导出、提交或分享 `cookies.txt`。仓库已通过 `.gitignore` 排除该文件。
-
-如果 Chrome 正在锁定 Cookie 数据库，可先完全退出 Chrome，再重试。具体行为取决于系统和 Chrome/yt-dlp 版本。
-
-## 输出规则
-
-文件名格式：
-
-```text
-视频标题 [YouTube_ID].扩展名
-```
-
-为保证跨平台兼容，文件名会移除不安全字符。插件使用 `--no-overwrites`，同名文件存在时不会覆盖。
-
-模式说明：
-
-| 模式 | 输出 | 主要依赖 |
-|---|---|---|
-| `video` | MP4 或最佳可用视频容器 | yt-dlp、ffmpeg |
-| `audio` | MP3 | yt-dlp、ffmpeg |
-| `subtitles` | SRT | yt-dlp、ffmpeg |
-
-## 常见问题
-
-### `yt-dlp is not installed`
-
-按照上面的系统安装步骤安装，并确保 `yt-dlp` 位于 `PATH`：
-
-```bash
-command -v yt-dlp
-```
-
-### `ffmpeg not found`
-
-安装 `ffmpeg`，重新打开终端，并验证 `ffmpeg -version`。
-
-### `Sign in to confirm you’re not a bot`
-
-先在 Chrome 登录 YouTube，再使用 `--cookies-from-browser chrome`。仍失败时升级 `yt-dlp`。
-
-### `Requested format is not available`
-
-升级 `yt-dlp` 后重试。某些视频不提供 MP4 音视频组合，脚本会回退到最佳可用格式并由 ffmpeg 合并。
-
-### 下载速度慢或失败
-
-检查网络、代理、防火墙和 YouTube 的地区限制。插件不会绕过 DRM、付费权限或平台访问控制。
-
-### 插件安装后没有触发
-
-确认 `codex plugin list` 显示插件已启用，然后新建一个 Codex 任务。旧任务不会自动重新加载新技能。
-
-## 更新
-
-```bash
-cd youtube-dl-codex-plugin
-git pull
-codex plugin add youtube-dl@youtube-dl-marketplace
-```
-
-同时建议更新下载器：
-
-```bash
-yt-dlp -U
-```
-
-如果通过 Homebrew 安装：
-
-```bash
-brew upgrade yt-dlp ffmpeg
-```
-
-## 安全与合规
-
-- 仅下载你有权访问和保存的内容。
-- 遵守 YouTube 服务条款、版权规则和当地法律。
-- 插件不包含账号、密码、Cookie 或遥测服务。
-- 不支持绕过 DRM、付费墙或账号权限。
-
-## 许可证
-
-本插件采用 MIT License。`yt-dlp` 和 `ffmpeg` 分别遵循其自身许可证。
+MIT，见 [LICENSE](LICENSE)。请只下载你有权获取的内容。

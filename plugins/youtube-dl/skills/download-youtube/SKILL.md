@@ -5,7 +5,9 @@ description: Download YouTube videos, Shorts, playlists, audio, and subtitles wi
 
 # Download YouTube
 
-Use `scripts/download_youtube.sh` for deterministic downloads.
+Use `scripts/download_youtube.sh` for deterministic downloads. It forwards to
+the standalone downloader at `standalone/youtube_downloader.py`, which is where
+the behaviour lives; run it with `--help` to see every option.
 
 ## Workflow
 
@@ -21,12 +23,18 @@ Use `scripts/download_youtube.sh` for deterministic downloads.
 scripts/download_youtube.sh --url URL --output-dir DIR --mode video
 scripts/download_youtube.sh --url URL --output-dir DIR --mode audio
 scripts/download_youtube.sh --url URL --output-dir DIR --mode subtitles
+scripts/download_youtube.sh --url URL --output-dir DIR --mode video --quality 1080
 scripts/download_youtube.sh --url URL --output-dir DIR --mode video --cookies-from-browser chrome
 ```
 
 - `video`: download the best MP4-compatible video and audio.
 - `audio`: download the best audio and convert it to MP3.
 - `subtitles`: download manual and automatic subtitles as SRT, preferring Chinese and English.
+
+`--quality` accepts `best` (default), `1080`, `720`, or `480`, and caps the video
+height. Use it when the user asks for a specific resolution or a smaller file.
+
+`--cookies-from-browser` accepts `chrome`, `edge`, `firefox`, or `brave`.
 
 Add `--playlist` only when the user explicitly requests the entire playlist.
 

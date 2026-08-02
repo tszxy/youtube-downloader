@@ -5,6 +5,7 @@
   "author": {
     "name": "tszxy"
   },
+  "license": "MIT",
   "skills": "./skills/",
   "interface": {
     "displayName": "YouTube 下载器",

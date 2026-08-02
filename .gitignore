@@ -8,3 +8,7 @@
 *.srt
 *.vtt
 cookies.txt
+standalone/tools/
+standalone/windows/tools/
+__pycache__/
+*.pyc
