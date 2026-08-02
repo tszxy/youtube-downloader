@@ -36,6 +36,9 @@ BROWSERS = ("chrome", "edge", "firefox", "brave", "safari", "chromium", "opera",
 
 YOUTUBE_URL = re.compile(r"^https?://([\w-]+\.)*(youtube\.com|youtu\.be)/", re.IGNORECASE)
 PROGRESS = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%")
+# "Sign in to confirm you're not a bot" and "... confirm your age" are both
+# fixed by the same thing: borrowing a logged-in browser's cookies.
+BOT_CHECK = re.compile(r"sign in to confirm", re.IGNORECASE)
 
 YT_DLP_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download"
 FFMPEG_WINDOWS_ZIP = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -342,8 +345,30 @@ class Download:
             self.close()
 
 
-def run_download(url, on_line=print, **options):
-    """Blocking download. Returns the yt-dlp exit code."""
+def bot_check_hint(cookies_browser=""):
+    """What to do about YouTube's "prove you are not a bot" refusal.
+
+    yt-dlp's own message names the flags but not which browser to pick, and it
+    scrolls past in the log, so the advice is repeated at the end of the run.
+    """
+    if cookies_browser:
+        return (
+            "YouTube 仍然要求验证：请确认 {} 已登录 YouTube（并且已完全退出该浏览器，"
+            "否则读不到 cookies），或换一个浏览器、稍后再试。".format(cookies_browser)
+        )
+    return (
+        "YouTube 要求验证你不是机器人。用已登录的浏览器身份重试："
+        "命令行加 --cookies-from-browser chrome（edge / firefox / safari 等同理），"
+        "图形界面在“浏览器登录状态”里选一个。"
+    )
+
+
+def run_download(url, on_line=print, on_job=None, **options):
+    """Blocking download. Returns the yt-dlp exit code.
+
+    on_job receives the Download as soon as it starts, so a caller with a
+    cancel button can reach the running process.
+    """
     runner = find_runner()
     if runner is None:
         raise RuntimeError(
@@ -363,8 +388,13 @@ def run_download(url, on_line=print, **options):
 
     job = Download(cmd)
     job.start()
+    if on_job is not None:
+        on_job(job)
+    blocked = False
     try:
         for line in job.lines():
+            if BOT_CHECK.search(line):
+                blocked = True
             on_line(line)
     except KeyboardInterrupt:
         job.cancel()
@@ -372,7 +402,13 @@ def run_download(url, on_line=print, **options):
         return 130
     finally:
         job.close()
-    return job.process.wait()
+
+    code = job.process.wait()
+    # Only after a failure: yt-dlp mentions the bot check in warnings it then
+    # recovers from, and advice on a finished download is just noise.
+    if code != 0 and blocked:
+        on_line(bot_check_hint(options.get("cookies_browser", "")))
+    return code
 
 
 # --------------------------------------------------------------------------
@@ -584,35 +620,24 @@ def run_gui():
         set_busy(True, "正在下载...")
         append("开始下载：{}".format(url))
 
+        # Every widget is read here, on the main thread: Tk variables are not
+        # thread-safe, and reading them from the worker raises "main thread is
+        # not in main loop".
+        options = dict(
+            mode=selected(mode_var, MODE_LABELS),
+            quality=selected(quality_var, QUALITY_LABELS),
+            output_dir=folder,
+            playlist=playlist_var.get(),
+            cookies_browser=selected(browser_var, BROWSER_LABELS),
+        )
+
         def task():
-            job_holder = {}
-
-            def on_line(line):
-                append(line)
-
-            def run():
-                options = dict(
-                    mode=selected(mode_var, MODE_LABELS),
-                    quality=selected(quality_var, QUALITY_LABELS),
-                    output_dir=folder,
-                    playlist=playlist_var.get(),
-                    cookies_browser=selected(browser_var, BROWSER_LABELS),
-                )
-                runner = find_runner()
-                Path(folder).mkdir(parents=True, exist_ok=True)
-                if not ffmpeg_available():
-                    on_line("警告：{}".format(ffmpeg_hint()))
-                options["ffmpeg_dir"] = find_ffmpeg_dir()
-                cmd = build_command(runner, url, **options)
-                job = Download(cmd)
+            # Shares run_download with the CLI so the two cannot drift; on_job
+            # hands the running process to the cancel button.
+            def on_job(job):
                 state["job"] = job
-                job_holder["job"] = job
-                job.start()
-                for line in job.lines():
-                    on_line(line)
-                return job.process.wait()
 
-            return run()
+            return run_download(url, on_line=append, on_job=on_job, **options)
 
         worker(task)
 

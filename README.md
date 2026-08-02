@@ -101,7 +101,8 @@ python3 $P "https://youtu.be/ID" --cookies-from-browser chrome
 
 ### 遇到 "Sign in to confirm you're not a bot"
 
-YouTube 对部分 IP 会要求验证。加上浏览器登录状态即可：
+YouTube 对部分 IP 会要求验证。下载因此失败时，工具会在日志末尾直接把解决办法打出来。
+加上浏览器登录状态即可：
 
 ```bash
 python3 standalone/youtube_downloader.py "URL" --cookies-from-browser chrome
@@ -131,7 +132,7 @@ Windows 用户也能双击运行。`tests/compare_implementations.sh` 在 CI 中
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests -v     # 29 个测试（含 GUI 冒烟测试）
+python3 -m unittest discover -s tests -v     # 37 个测试（含 GUI 冒烟测试）
 ./tests/compare_implementations.sh pwsh      # 两份实现的等价性（需要 pwsh）
 ```
 

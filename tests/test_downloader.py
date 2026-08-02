@@ -238,6 +238,62 @@ class TestCancellation(unittest.TestCase):
         self.assertFalse(alive(child[0]), "ffmpeg-like child survived cancellation")
 
 
+class TestBotCheck(unittest.TestCase):
+    """YouTube's "prove you are not a bot" refusal is the most common failure."""
+
+    # A Python stub rather than a shell script: the CI matrix includes Windows.
+    def run_with_stub(self, printed, exit_code, **options):
+        stub = Path(tempfile.mkdtemp()) / "stub.py"
+        stub.write_text(
+            "import sys\n"
+            "print({!r})\n"
+            "sys.exit({})\n".format(printed, exit_code),
+            encoding="utf-8",
+        )
+        original = yd.find_runner
+        yd.find_runner = lambda: [sys.executable, str(stub)]
+        lines = []
+        try:
+            with tempfile.TemporaryDirectory() as out:
+                code = yd.run_download(URL, on_line=lines.append, output_dir=out, **options)
+        finally:
+            yd.find_runner = original
+        return code, "\n".join(lines)
+
+    BLOCKED = "ERROR: [youtube] ID: Sign in to confirm you’re not a bot. Use --cookies"
+
+    def test_failure_appends_the_hint(self):
+        code, log = self.run_with_stub(self.BLOCKED, 1)
+        self.assertEqual(code, 1)
+        self.assertIn("--cookies-from-browser", log)
+
+    def test_hint_names_the_browser_already_in_use(self):
+        _, log = self.run_with_stub(self.BLOCKED, 1, cookies_browser="firefox")
+        self.assertIn("firefox", log)
+
+    def test_no_hint_when_the_download_succeeds(self):
+        # yt-dlp prints the same wording in warnings it goes on to recover from.
+        code, log = self.run_with_stub(self.BLOCKED, 0)
+        self.assertEqual(code, 0)
+        self.assertNotIn("--cookies-from-browser", log)
+
+    def test_no_hint_for_unrelated_failures(self):
+        _, log = self.run_with_stub("ERROR: unable to write data: No space left", 1)
+        self.assertNotIn("--cookies-from-browser", log)
+
+    def test_on_job_exposes_the_running_process(self):
+        seen = []
+        original = yd.find_runner
+        yd.find_runner = lambda: [sys.executable, "-c", "pass"]
+        try:
+            with tempfile.TemporaryDirectory() as out:
+                yd.run_download(URL, on_line=lambda _: None, on_job=seen.append, output_dir=out)
+        finally:
+            yd.find_runner = original
+        self.assertEqual(len(seen), 1, "the cancel button never received the job")
+        self.assertIsInstance(seen[0], yd.Download)
+
+
 class TestToolDiscovery(unittest.TestCase):
     def test_find_runner_returns_list_or_none(self):
         runner = yd.find_runner()

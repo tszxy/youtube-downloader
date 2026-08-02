@@ -13,6 +13,9 @@ Skipped automatically when there is no display or no tkinter.
 """
 
 import importlib.util
+import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -158,6 +161,48 @@ class TestGuiBuilds(unittest.TestCase):
         self.pump(action=action)
         self.assertTrue(self.warnings)
         self.assertIn("链接无效", self.warnings[0][0])
+
+    def test_download_button_streams_yt_dlp_output_into_the_log(self):
+        """The download button must reach run_download and pump its output.
+
+        The GUI used to carry its own copy of that loop; this covers the path
+        end to end so the copy cannot come back unnoticed.
+        """
+        marker = "STUB-RAN-OK"
+        stub = Path(tempfile.mkdtemp()) / "stub.py"
+        stub.write_text("print({!r})\n".format(marker), encoding="utf-8")
+        self.yd.find_runner = lambda: [sys.executable, str(stub)]
+        out_dir = tempfile.mkdtemp()
+        captured = {}
+
+        def widgets_of_class(widget, names, out):
+            if widget.winfo_class() in names:
+                out.append(widget)
+            for child in widget.winfo_children():
+                widgets_of_class(child, names, out)
+            return out
+
+        def action(root):
+            entries = widgets_of_class(root, ("TEntry", "Entry"), [])
+            self.assertGreaterEqual(len(entries), 2, "expected a URL and a folder entry")
+            entries[0].insert(0, "https://youtu.be/ID")
+            entries[1].delete(0, "end")
+            entries[1].insert(0, out_dir)
+            self.click(root, "开始下载")
+
+            log = widgets_of_class(root, ("Text",), [])[0]
+            # The download runs on a worker thread and reaches the log only via
+            # the 120 ms drain timer, so pump until it shows up.
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                root.update()
+                if marker in log.get("1.0", "end"):
+                    break
+                time.sleep(0.05)
+            captured["log"] = log.get("1.0", "end")
+
+        self.pump(action=action, cycles=5)
+        self.assertIn(marker, captured.get("log", ""))
 
 
 if __name__ == "__main__":

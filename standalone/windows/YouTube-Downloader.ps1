@@ -18,6 +18,9 @@ $toolsDir = Join-Path $scriptDir "tools"
 $script:activeProcess = $null
 $script:logQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 $script:maxLogLines = 2000
+# Set by the output reader when yt-dlp hits YouTube's "Sign in to confirm
+# you're not a bot" (or "... your age") wall; both are fixed by cookies.
+$script:botCheck = $false
 
 function Find-Executable([string]$name, [string]$portablePath) {
     if (Test-Path $portablePath) { return $portablePath }
@@ -129,6 +132,14 @@ function Add-Log([string]$message) {
     $script:logQueue.Enqueue($message)
 }
 
+function Receive-ToolOutput([string]$data) {
+    # One line from yt-dlp. Matching here rather than in Add-Log keeps this
+    # script's own messages out of the bot-check test.
+    if (-not $data) { return }
+    Add-Log $data
+    if ($data -match '(?i)sign in to confirm') { $script:botCheck = $true }
+}
+
 function Set-Busy([bool]$busy, [string]$status) {
     $downloadButton.Enabled = -not $busy
     $installButton.Enabled = -not $busy
@@ -151,8 +162,8 @@ function Start-ToolProcess([string]$fileName, [string[]]$arguments, [string]$bus
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
     $process.EnableRaisingEvents = $true
-    $process.add_OutputDataReceived({ if ($EventArgs.Data) { Add-Log $EventArgs.Data } })
-    $process.add_ErrorDataReceived({ if ($EventArgs.Data) { Add-Log $EventArgs.Data } })
+    $process.add_OutputDataReceived({ Receive-ToolOutput $EventArgs.Data })
+    $process.add_ErrorDataReceived({ Receive-ToolOutput $EventArgs.Data })
     $process.add_Exited({
         $exitCode = $process.ExitCode
         $form.BeginInvoke([Action]{ & $onExit $exitCode }) | Out-Null
@@ -407,12 +418,25 @@ $downloadButton.Add_Click({
 
     $logBox.Clear()
     $progressBar.Value = 0
+    $script:botCheck = $false
+    # Script-scoped: the exit callback runs in Start-ToolProcess's scope and
+    # cannot see locals from this click handler.
+    $script:cookieBrowser = if ($browserBox.SelectedIndex -gt 0) { $browserBox.SelectedItem.ToString() } else { "" }
     Add-Log "开始下载：$url"
     Start-ToolProcess $ytDlp $arguments "正在下载..." {
         param($exitCode)
         Set-Busy $false $(if ($exitCode -eq 0) { "下载完成" } else { "下载失败，退出代码：$exitCode" })
         if ($exitCode -eq 0) { $progressBar.Value = 100 }
         Add-Log $statusLabel.Text
+        # Only after a failure: yt-dlp also mentions the bot check in warnings
+        # it goes on to recover from.
+        if ($exitCode -ne 0 -and $script:botCheck) {
+            if ($script:cookieBrowser) {
+                Add-Log "YouTube 仍然要求验证：请确认 $($script:cookieBrowser) 已登录 YouTube（并且已完全退出该浏览器，否则读不到 cookies），或换一个浏览器、稍后再试。"
+            } else {
+                Add-Log "YouTube 要求验证你不是机器人。请在“浏览器登录状态”里选择一个已登录 YouTube 的浏览器后重试。"
+            }
+        }
     } | Out-Null
 })
 
