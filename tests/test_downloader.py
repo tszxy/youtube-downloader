@@ -110,11 +110,14 @@ class TestCommandBuilding(unittest.TestCase):
                 self.assertIn("--concurrent-fragments", args_for(mode=mode))
 
     def test_output_template_includes_directory(self):
-        args = args_for(output_dir="/tmp/somewhere")
+        # Compare through Path so the separator matches the host OS.
+        target = Path("/tmp/somewhere")
+        args = args_for(output_dir=str(target))
         template = args[args.index("--output") + 1]
-        self.assertTrue(template.startswith("/tmp/somewhere"))
+        self.assertTrue(template.startswith(str(target)), template)
         self.assertIn("%(title)s", template)
         self.assertIn("%(id)s", template)
+        self.assertEqual(Path(template).parent, target)
 
     def test_ffmpeg_location_only_when_given(self):
         self.assertNotIn("--ffmpeg-location", args_for())

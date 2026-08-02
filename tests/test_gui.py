@@ -80,6 +80,14 @@ class TestGuiBuilds(unittest.TestCase):
                 for _ in range(cycles):
                     root.update()
             self.widgets = snapshot(root, [])
+            # The app cancels its drain timer in on_close, which this fake
+            # mainloop bypasses. Clear anything still pending so Tcl does not
+            # fire a callback against a destroyed window.
+            for pending in root.tk.splitlist(root.tk.call("after", "info")):
+                try:
+                    root.after_cancel(pending)
+                except Exception:  # noqa: BLE001 - already fired
+                    pass
             root.destroy()
 
         tkinter.Tk.mainloop = fake_mainloop

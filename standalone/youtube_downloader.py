@@ -460,7 +460,7 @@ def run_gui():
     BROWSER_LABELS = [("不使用", "")] + [(name.capitalize(), name) for name in BROWSERS]
 
     messages = queue.Queue()
-    state = {"job": None, "busy": False}
+    state = {"job": None, "busy": False, "timer": None}
 
     root = tk.Tk()
     root.title(APP_TITLE)
@@ -657,9 +657,15 @@ def run_gui():
                 log.delete("1.0", "{}.0".format(excess + 1))
             log.see("end")
             log.configure(state="disabled")
-        root.after(120, drain)
+        state["timer"] = root.after(120, drain)
 
     def on_close():
+        # Cancel the pending drain first: letting it fire after the window is
+        # gone makes Tcl raise "invalid command name ...drain".
+        timer = state.get("timer")
+        if timer is not None:
+            root.after_cancel(timer)
+            state["timer"] = None
         job = state.get("job")
         if job is not None:
             job.cancel()
@@ -667,7 +673,7 @@ def run_gui():
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     url_entry.focus_set()
-    root.after(120, drain)
+    state["timer"] = root.after(120, drain)
     root.mainloop()
     return 0
 
