@@ -9,7 +9,11 @@ param(
     [string]$OutputDir = ".",
     [switch]$Playlist,
     [string]$CookiesFromBrowser = "",
-    [switch]$PrintCommand
+    [switch]$PrintCommand,
+    # Builds every control and exits instead of opening the window. -PrintCommand
+    # returns before Add-Type, so without this the entire GUI half of this file
+    # is never executed anywhere -- which is how a startup crash can ship.
+    [switch]$SmokeTest
 )
 
 $ErrorActionPreference = "Stop"
@@ -444,5 +448,13 @@ $form.Add_FormClosing({
     $logTimer.Stop()
     Stop-ProcessTree $script:activeProcess
 })
+
+if ($SmokeTest) {
+    # Reached only if every control above was constructed without throwing.
+    $logTimer.Stop()
+    Write-Host "smoke test ok: PowerShell $($PSVersionTable.PSVersion), $($form.Controls.Count) controls"
+    $form.Dispose()
+    exit 0
+}
 
 [void]$form.ShowDialog()

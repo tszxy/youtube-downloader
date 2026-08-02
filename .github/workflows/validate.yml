@@ -165,6 +165,15 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File standalone\windows\Install-Dependencies.ps1 -CheckPublished
           pwsh -NoProfile -File standalone\windows\Install-Dependencies.ps1 -CheckPublished
 
+      # The window is what Windows users actually double-click, and until this
+      # step nothing ever executed it: -PrintCommand returns before Add-Type,
+      # so a crash while building the form would only ever be seen by a user.
+      - name: The GUI builds under both editions
+        shell: cmd
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File standalone\windows\YouTube-Downloader.ps1 -SmokeTest || exit /b 1
+          pwsh -NoProfile -File standalone\windows\YouTube-Downloader.ps1 -SmokeTest || exit /b 1
+
       - name: .ps1 files with Chinese text must carry a UTF-8 BOM
         shell: bash
         run: |
