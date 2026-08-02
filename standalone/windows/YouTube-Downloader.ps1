@@ -60,8 +60,14 @@ function Stop-ProcessTree([System.Diagnostics.Process]$process) {
 }
 
 function Get-VideoFormat([string]$quality) {
-    if ($quality -eq "best") { return "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b" }
-    return "bv*[height<=$quality][ext=mp4]+ba[ext=m4a]/b[height<=$quality][ext=mp4]/bv*[height<=$quality]+ba/b"
+    # H.264 (avc1) first on purpose: YouTube increasingly serves AV1, which is
+    # smaller but will not play on older phones, TVs and desktop players. Each
+    # fallback loosens one constraint so a download never fails outright.
+    # Mirrors video_format() in standalone/youtube_downloader.py.
+    if ($quality -eq "best") {
+        return "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
+    }
+    return "bv*[height<=$quality][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=$quality][ext=mp4]+ba[ext=m4a]/b[height<=$quality][ext=mp4]/bv*[height<=$quality]+ba/b"
 }
 
 function Build-YtDlpArgumentList {
@@ -93,7 +99,7 @@ function Build-YtDlpArgumentList {
         "audio"  { $arguments += @("--format", "ba/b", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0") }
         "subtitles" {
             $arguments += @("--skip-download", "--write-subs", "--write-auto-subs",
-                            "--sub-langs", "zh-Hans,zh-Hant,zh.*,en.*", "--convert-subs", "srt")
+                            "--sub-langs", "zh-Hans,zh-Hant,zh,en", "--convert-subs", "srt")
         }
     }
     $arguments += $Url

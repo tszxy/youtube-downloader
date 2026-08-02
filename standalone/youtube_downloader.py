@@ -47,10 +47,22 @@ FFMPEG_WINDOWS_ZIP = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentia
 # --------------------------------------------------------------------------
 
 def video_format(quality: str) -> str:
-    """Format selector preferring MP4/M4A, optionally capped to a height."""
+    """Format selector preferring a widely playable MP4, optionally height-capped.
+
+    H.264 (avc1) comes first on purpose: YouTube increasingly serves AV1, which
+    is smaller but will not play on older phones, TVs and desktop players. Each
+    fallback loosens one constraint, so a download never fails for lack of an
+    exact match.
+    """
     if quality == "best":
-        return "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
+        return (
+            "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+            "bv*[ext=mp4]+ba[ext=m4a]/"
+            "b[ext=mp4]/"
+            "bv*+ba/b"
+        )
     return (
+        "bv*[height<={h}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
         "bv*[height<={h}][ext=mp4]+ba[ext=m4a]/"
         "b[height<={h}][ext=mp4]/"
         "bv*[height<={h}]+ba/b"
@@ -106,7 +118,10 @@ def build_command(
     else:
         cmd += [
             "--skip-download", "--write-subs", "--write-auto-subs",
-            "--sub-langs", "zh-Hans,zh-Hant,zh.*,en.*",
+            # Exact tags, not wildcards: "zh.*,en.*" matches ~20 tracks on a
+            # popular video, and each one is a separate request that reliably
+            # trips YouTube's rate limiting.
+            "--sub-langs", "zh-Hans,zh-Hant,zh,en",
             "--convert-subs", "srt",
         ]
 

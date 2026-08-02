@@ -97,6 +97,29 @@ class TestCommandBuilding(unittest.TestCase):
         self.assertIn("--skip-download", args)
         self.assertEqual(args[args.index("--convert-subs") + 1], "srt")
 
+    def test_subtitle_languages_are_exact_tags(self):
+        # Wildcards like "en.*" match ~20 tracks on a popular video, and each
+        # one is a request that trips YouTube's rate limiting.
+        langs = args_for(mode="subtitles")
+        langs = langs[langs.index("--sub-langs") + 1].split(",")
+        self.assertLessEqual(len(langs), 6)
+        for tag in langs:
+            with self.subTest(tag=tag):
+                self.assertNotIn("*", tag)
+        self.assertIn("en", langs)
+        self.assertIn("zh-Hans", langs)
+
+    def test_video_prefers_h264_before_falling_back(self):
+        # AV1 plays badly on older devices, so avc1 must be tried first, and
+        # the chain must still end in an unconstrained fallback.
+        for quality in yd.QUALITIES:
+            with self.subTest(quality=quality):
+                tiers = yd.video_format(quality).split("/")
+                self.assertIn("vcodec^=avc1", tiers[0])
+                self.assertEqual(tiers[-1], "b")
+                unconstrained = [t for t in tiers if "[" not in t]
+                self.assertTrue(unconstrained, "no unconstrained fallback tier")
+
     def test_cookies_browser_is_passed_through(self):
         args = args_for(cookies_browser="firefox")
         self.assertEqual(args[args.index("--cookies-from-browser") + 1], "firefox")
