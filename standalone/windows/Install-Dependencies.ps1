@@ -4,7 +4,11 @@ param(
     # Exercises the pure helpers below and exits, without touching the network
     # or writing anything. CI runs it under both PowerShell editions, which is
     # the only way to catch the byte[] behaviour described in Get-ResponseText.
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    # Same parsing, against the live SHA2-256SUMS instead of a sample. Proves
+    # the byte[] claim on a real response and that the checksum is still found
+    # end to end. Needs the network, so CI runs it without gating on it.
+    [switch]$CheckPublished
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,6 +71,19 @@ if ($SelfTest) {
         exit 1
     }
     Write-Host "self-test ok"
+    exit 0
+}
+
+if ($CheckPublished) {
+    $raw = (Invoke-WebRequest -UseBasicParsing `
+        -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS").Content
+    Write-Host "PowerShell $($PSVersionTable.PSVersion) received: $($raw.GetType().FullName)"
+    $found = Get-PublishedChecksum (Get-ResponseText $raw) "yt-dlp.exe"
+    if (-not $found) {
+        Write-Host "FAILED: yt-dlp.exe not found in the published list" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "found published checksum for yt-dlp.exe: $found"
     exit 0
 }
 

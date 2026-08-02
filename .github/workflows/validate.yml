@@ -156,6 +156,15 @@ jobs:
         shell: pwsh
         run: ./standalone/windows/Install-Dependencies.ps1 -SelfTest
 
+      # Against the live file, so it also catches yt-dlp changing the list
+      # format. Not a gate: it is the only step here that needs the network.
+      - name: Live SHA2-256SUMS parses under both editions
+        continue-on-error: true
+        shell: cmd
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File standalone\windows\Install-Dependencies.ps1 -CheckPublished
+          pwsh -NoProfile -File standalone\windows\Install-Dependencies.ps1 -CheckPublished
+
       - name: .ps1 files with Chinese text must carry a UTF-8 BOM
         shell: bash
         run: |
