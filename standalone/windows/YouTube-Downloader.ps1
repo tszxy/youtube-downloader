@@ -248,7 +248,11 @@ function Start-ToolProcess([string]$fileName, [string[]]$arguments, [string]$bus
     $startInfo.RedirectStandardError = $true
     $startInfo.CreateNoWindow = $true
     # yt-dlp is Python, and with its output redirected it would otherwise encode
-    # using the system codepage, turning Chinese video titles into mojibake.
+    # using the system codepage, so a Chinese title or even the curly quote in
+    # yt-dlp's own "you're not a bot" message arrives as mojibake. PYTHONUTF8
+    # is the one that actually takes effect in the frozen build; PYTHONIOENCODING
+    # stays as the fallback for older yt-dlp releases.
+    $startInfo.EnvironmentVariables["PYTHONUTF8"] = "1"
     $startInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
 
     $process = New-Object System.Diagnostics.Process
@@ -583,6 +587,40 @@ if ($SmokeTest) {
     $script:botCheck = $false
     Receive-ToolOutput "ERROR: [youtube] ID: Sign in to confirm you are not a bot."
     if (-not $script:botCheck) { $failures += "the bot-check line was not recognised" }
+
+    # A child writing UTF-8 must survive the tap, the stateful decoder and the
+    # log box intact: a real run showed yt-dlp's curly quote arriving as U+FFFD.
+    $sample = "标题 title with a curly quote: you’re ok"
+    $childScript = Join-Path ([System.IO.Path]::GetTempPath()) "yt-dl-smoke-child.ps1"
+    [System.IO.File]::WriteAllText(
+        $childScript,
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`r`nWrite-Output `"$sample`"`r`n",
+        (New-Object System.Text.UTF8Encoding($true)))
+    $observed.Remove("exitCode")
+    Start-ToolProcess "powershell.exe" `
+        @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $childScript) "smoke" {
+        param($exitCode)
+        $observed["exitCode"] = $exitCode
+    } | Out-Null
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not $observed.ContainsKey("exitCode") -and (Get-Date) -lt $deadline) {
+        Update-ToolProcess
+        Update-LogBox
+        Start-Sleep -Milliseconds 50
+    }
+    Remove-Item -LiteralPath $childScript -Force -ErrorAction SilentlyContinue
+    if ($logBox.Text -notmatch [regex]::Escape($sample)) {
+        $failures += "UTF-8 child output was mangled; log box holds: $($logBox.Text)"
+    }
+
+    # This script's own Chinese, curly quotes included, must reach the box whole:
+    # a real run appeared to stop at the opening quote of 浏览器登录状态.
+    $hint = "YouTube 要求验证你不是机器人。请在“浏览器登录状态”里选择一个已登录 YouTube 的浏览器后重试。"
+    Add-Log $hint
+    Update-LogBox
+    if ($logBox.Text -notmatch [regex]::Escape($hint)) {
+        $failures += "the bot-check hint did not survive the log box intact"
+    }
 
     if ($failures.Count -gt 0) {
         $failures | ForEach-Object { Write-Host "smoke test FAILED: $_" -ForegroundColor Red }
