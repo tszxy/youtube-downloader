@@ -1170,6 +1170,34 @@ def run_gui():
             log.configure(state="disabled")
         state["timer"] = root.after(120, drain)
 
+    def offer_missing_dependencies():
+        """One entry point: whatever is missing is detected and offered here.
+
+        Anything already present is skipped in silence -- a working install
+        must not be nagged on every launch.
+        """
+        missing = []
+        if find_runner() is None:
+            missing.append("yt-dlp")
+        if not ffmpeg_available():
+            missing.append("FFmpeg")
+        if not missing:
+            return
+        joined = "、".join(missing)
+        if messagebox.askyesno(
+                "缺少依赖",
+                "缺少：{}\n\n现在自动下载并安装吗？\n"
+                "（会校验 SHA-256，安装到 tools/ 文件夹，不影响系统其他部分。）".format(joined),
+                parent=root):
+            start_install()
+        else:
+            append("缺少 {}。可以随时点「安装/更新依赖」。".format(joined))
+
+    def on_startup():
+        # Dependencies first: that is the one that stops a download outright.
+        offer_missing_dependencies()
+        offer_chrome_quit()
+
     def offer_chrome_quit():
         """Startup question: Chrome cannot be running when cookies are read.
 
@@ -1215,7 +1243,7 @@ def run_gui():
     state["timer"] = root.after(120, drain)
     # Deferred rather than called here: the window has to be on screen first,
     # or the dialog appears in front of nothing and cannot be placed properly.
-    root.after(300, offer_chrome_quit)
+    root.after(300, on_startup)
     root.mainloop()
     return 0
 

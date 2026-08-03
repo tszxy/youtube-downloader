@@ -594,6 +594,49 @@ class TestVersion(unittest.TestCase):
             "version in a bug report means nothing")
 
 
+class TestWindowsParity(unittest.TestCase):
+    """The PowerShell GUI must carry the startup checks the Python one does.
+
+    Windows is where the locked cookie database and the missing dependencies
+    actually bite, and it is the platform least likely to have a terminal open
+    to work around either. A check that exists only in Python is a check the
+    people who need it most never see.
+    """
+
+    PS1 = ROOT / "standalone" / "windows" / "YouTube-Downloader.ps1"
+    WINDOWS = ROOT / "standalone" / "windows"
+
+    def setUp(self):
+        self.source = self.PS1.read_text(encoding="utf-8")
+
+    def test_chrome_is_detected_and_can_be_closed(self):
+        for needed in ("Test-ChromeRunning", "Stop-Chrome", "7271"):
+            self.assertIn(needed, self.source,
+                          "the PowerShell GUI lost the Chrome check: " + needed)
+
+    def test_chrome_is_asked_about_politely_before_being_forced(self):
+        # CloseMainWindow before taskkill /F: the reverse loses unsaved tabs
+        # without ever asking Chrome to close itself.
+        self.assertLess(self.source.index("CloseMainWindow"),
+                        self.source.index("taskkill.exe /IM chrome.exe"))
+
+    def test_startup_offers_whatever_is_missing(self):
+        shown = self.source.index("$form.Add_Shown")
+        handler = self.source[shown:]
+        for needed in ("Find-Executable", "Resolve-FfmpegDirectory", "缺少依赖"):
+            self.assertIn(needed, handler,
+                          "startup stopped checking for " + needed)
+
+    def test_one_entry_point_and_the_old_names_forward_to_it(self):
+        entry = self.WINDOWS / "YouTube-Downloader.bat"
+        self.assertTrue(entry.is_file(), "the single entry point is missing")
+        self.assertIn("YouTube-Downloader.ps1", entry.read_text(encoding="utf-8"))
+        for old in ("Run-Downloader.bat", "Install-and-Run.bat"):
+            text = (self.WINDOWS / old).read_text(encoding="utf-8")
+            self.assertIn("YouTube-Downloader.bat", text,
+                          "{} no longer forwards to the one entry".format(old))
+
+
 class TestToolDiscovery(unittest.TestCase):
     def test_find_runner_returns_list_or_none(self):
         runner = yd.find_runner()

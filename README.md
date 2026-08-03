@@ -44,8 +44,13 @@ python3 standalone/youtube_downloader.py "https://youtu.be/VIDEO_ID" -o ~/Downlo
 **A. 不需要装任何东西**（PowerShell 图形版）
 
 1. 打开 `standalone\windows\`
-2. 第一次双击 `Install-and-Run.bat` —— 自动下载 yt-dlp 和 FFmpeg 到 `tools\`，校验 SHA-256 后打开界面
-3. 以后双击 `Run-Downloader.bat`
+2. 双击 `YouTube-Downloader.bat` —— **每次都是它，没有第二个要选**
+
+界面打开后会自检 yt-dlp 和 FFmpeg：缺哪个就问你要不要现在装（下载到 `tools\`，
+校验 SHA-256），都齐了就直接进主界面，不打扰。所以第一次和以后没有区别。
+
+> `Install-and-Run.bat` 和 `Run-Downloader.bat` 仍然保留，只是转发到上面那个，
+> 免得旧的快捷方式失效。新用户认准 `YouTube-Downloader.bat` 就行。
 
 安装时每个下载都应该打印 `checksum ok`。如果看到黄色的
 `no published checksum for ..., skipping verification`，说明校验没做成，

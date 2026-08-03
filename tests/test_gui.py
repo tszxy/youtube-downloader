@@ -81,6 +81,11 @@ class TestGuiBuilds(unittest.TestCase):
         # No test may consult, let alone close, a real browser.
         self.yd.chrome_running = lambda: False
         self.yd.quit_chrome = lambda *a, **k: (self.quit_calls.append(1), True)[1]
+        # Present by default, so the startup dependency offer stays out of the
+        # way. Left real, a machine without ffmpeg would eat the answer queued
+        # for the Chrome question and fail unrelated tests.
+        self.yd.find_runner = lambda: ["yt-dlp"]
+        self.yd.ffmpeg_available = lambda: True
 
     def _answer(self, *args, **kwargs):
         self.asked.append(args)
@@ -410,6 +415,36 @@ class TestGuiBuilds(unittest.TestCase):
         self.pump(action=lambda root: time.sleep(0.4))
         self.assertTrue(self.asked)
         self.assertFalse(self.quit_calls, "Chrome was closed despite the user declining")
+
+    # --- the startup dependency check -------------------------------------
+
+    def test_missing_dependencies_are_offered_for_installing(self):
+        self.yd.find_runner = lambda: None
+        self.yd.ffmpeg_available = lambda: False
+        self.answers.append(False)  # decline, so no installer actually runs
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertTrue(self.asked, "nothing was offered for a missing yt-dlp")
+        offered = " ".join(str(a) for a in self.asked[0])
+        self.assertIn("yt-dlp", offered)
+        self.assertIn("FFmpeg", offered)
+
+    def test_a_complete_install_is_not_nagged(self):
+        self.yd.find_runner = lambda: ["yt-dlp"]
+        self.yd.ffmpeg_available = lambda: True
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertFalse(self.asked, "asked about dependencies that were present")
+
+    def test_only_the_missing_half_is_named(self):
+        # ffmpeg alone missing: naming yt-dlp too would send people looking for
+        # a problem they do not have.
+        self.yd.find_runner = lambda: ["yt-dlp"]
+        self.yd.ffmpeg_available = lambda: False
+        self.answers.append(False)
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertTrue(self.asked)
+        offered = " ".join(str(a) for a in self.asked[0])
+        self.assertIn("FFmpeg", offered)
+        self.assertNotIn("yt-dlp", offered)
 
     def test_title_bar_shows_the_version(self):
         self.pump()

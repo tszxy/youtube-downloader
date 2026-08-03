@@ -106,6 +106,51 @@ function Stop-ProcessTree([System.Diagnostics.Process]$process) {
     }
 }
 
+# Mirrors chrome_running / quit_chrome / CHROME_QUIT_QUESTION in
+# youtube_downloader.py. A test fails if this file stops carrying them, because
+# the Windows GUI is the one most likely to hit the locked database and the
+# least likely to have a terminal handy for taskkill.
+$script:chromeQuitQuestion = @"
+检测到 Chrome 正在运行。
+
+Chrome 运行时会独占 cookies 数据库，读取登录状态会失败（yt-dlp 已知问题 #7271）；关掉所有窗口并不等于退出。
+
+现在退出 Chrome 吗？未保存的网页内容会丢失，下载结束后可以重新打开。
+"@
+$script:chromeStillRunning = "Chrome 仍在运行。如果之后提示读取 cookies 失败，请先彻底退出 Chrome 再重试。"
+
+function Test-ChromeRunning {
+    # Windows keeps Chrome alive after its last window closes whenever "continue
+    # running background apps" is on, which is the default, so ask the process
+    # list rather than the window list.
+    return @(Get-Process -Name "chrome" -ErrorAction SilentlyContinue).Count -gt 0
+}
+
+function Stop-Chrome {
+    # Polite first on purpose: a forced kill loses unsaved tab content and makes
+    # Chrome offer to restore the session on its next launch.
+    $running = @(Get-Process -Name "chrome" -ErrorAction SilentlyContinue)
+    if ($running.Count -eq 0) { return $true }
+    foreach ($process in $running) {
+        try { [void]$process.CloseMainWindow() } catch { }
+    }
+
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-ChromeRunning)) { return $true }
+        # The wait happens on the UI thread; without this the window that asked
+        # the question freezes for the whole eight seconds.
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 200
+    }
+
+    # Ignored the request -- usually a "leave site?" dialog holding it open.
+    # The user already agreed to Chrome going away.
+    & taskkill.exe /IM chrome.exe /T /F 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 700
+    return (-not (Test-ChromeRunning))
+}
+
 function Get-VideoFormat([string]$quality) {
     # H.264 (avc1) first on purpose: YouTube increasingly serves AV1, which is
     # smaller but will not play on older phones, TVs and desktop players. Each
@@ -1234,5 +1279,48 @@ if ($SmokeTest) {
     $form.Dispose()
     exit 0
 }
+
+$form.Add_Shown({
+    # One entry point: whatever is missing is detected and offered here, rather
+    # than split across an "install first" and a "run afterwards" launcher that
+    # nobody can tell apart six months later. Everything already present is
+    # skipped in silence -- a working install must not be nagged.
+    $missing = @()
+    if (-not (Find-Executable "yt-dlp" (Join-Path $toolsDir "yt-dlp.exe"))) { $missing += "yt-dlp" }
+    if (-not (Resolve-FfmpegDirectory)) { $missing += "FFmpeg" }
+
+    if ($missing.Count -gt 0) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "缺少：$($missing -join "、")`r`n`r`n现在自动下载并安装吗？`r`n（会校验 SHA-256，安装到 tools\ 文件夹，不影响系统其他部分。）",
+            "缺少依赖",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $installButton.PerformClick()
+        } else {
+            Add-Log "缺少 $($missing -join "、")。可以随时点「安装/更新依赖」。"
+        }
+    }
+
+    # Asked after the dependency offer, which is the one that blocks downloading
+    # outright. The install runs redirected in the background, so this question
+    # is not waiting on it.
+    if (Test-ChromeRunning) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            $script:chromeQuitQuestion, "Chrome 正在运行",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Add-Log "正在退出 Chrome..."
+            if (Stop-Chrome) {
+                Add-Log "Chrome 已退出，现在可以读取登录状态了。"
+            } else {
+                Add-Log "Chrome 没能退出，请手动退出后重试。"
+            }
+        } else {
+            Add-Log $script:chromeStillRunning
+        }
+    }
+})
 
 [void]$form.ShowDialog()
