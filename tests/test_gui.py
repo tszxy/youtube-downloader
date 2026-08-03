@@ -64,6 +64,7 @@ class TestGuiBuilds(unittest.TestCase):
     def setUp(self):
         self.yd = load_app()
         self.widgets = []
+        self.window_title = ""
         self.warnings = []
         self.asked = []
         self.answers = []
@@ -100,6 +101,10 @@ class TestGuiBuilds(unittest.TestCase):
                     action(root)
                     for _ in range(cycles):
                         root.update()
+                # Read off the live window, like every other snapshot here:
+                # asserting on the constant would not catch it never reaching
+                # the title bar.
+                self.window_title = root.title()
                 self.widgets = snapshot(root, [])
             finally:
                 # Always, even if action blew up: a window left alive with
@@ -405,6 +410,11 @@ class TestGuiBuilds(unittest.TestCase):
         self.pump(action=lambda root: time.sleep(0.4))
         self.assertTrue(self.asked)
         self.assertFalse(self.quit_calls, "Chrome was closed despite the user declining")
+
+    def test_title_bar_shows_the_version(self):
+        self.pump()
+        self.assertIn(self.yd.VERSION, self.window_title)
+        self.assertIn(self.yd.APP_NAME, self.window_title)
 
     def test_no_question_when_chrome_is_not_running(self):
         self.yd.chrome_running = lambda: False

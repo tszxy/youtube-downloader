@@ -700,7 +700,8 @@ function Complete-QueuedDownload([int]$exitCode) {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "YouTube 独立下载器"
+# Keep in step with VERSION in youtube_downloader.py; a test compares them.
+$form.Text = "YouTube 独立下载器 v1.0.0"
 # Taller than it was: the option groups are laid out flat instead of hidden
 # behind three dropdowns.
 $form.Size = New-Object System.Drawing.Size(820, 790)

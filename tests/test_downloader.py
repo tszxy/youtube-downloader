@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -564,6 +565,33 @@ class TestChromeQuitPrompt(unittest.TestCase):
         self.assertGreater(len(issued), 1, "a stubborn Chrome was never escalated")
         forced = " ".join(" ".join(cmd) for cmd in issued[1:])
         self.assertTrue("/F" in forced or "-9" in forced)
+
+
+class TestVersion(unittest.TestCase):
+    """The version in the title bar, and the two GUIs agreeing on it.
+
+    The point of showing it at all is that a bug report names a build, which
+    only works while both implementations report the same one.
+    """
+
+    PS1 = ROOT / "standalone" / "windows" / "YouTube-Downloader.ps1"
+
+    def test_version_looks_like_a_version(self):
+        self.assertRegex(yd.VERSION, r"^\d+\.\d+\.\d+$")
+
+    def test_title_bar_carries_the_version_and_the_name(self):
+        self.assertIn(yd.VERSION, yd.APP_TITLE)
+        self.assertIn(yd.APP_NAME, yd.APP_TITLE)
+
+    def test_powershell_gui_shows_the_same_version(self):
+        source = self.PS1.read_text(encoding="utf-8")
+        match = re.search(r'\$form\.Text\s*=\s*"([^"]+)"', source)
+        self.assertIsNotNone(match, "could not find the PowerShell window title")
+        title = match.group(1)
+        self.assertEqual(
+            title, yd.APP_TITLE,
+            "the two GUIs disagree about the title bar; update both or the "
+            "version in a bug report means nothing")
 
 
 class TestToolDiscovery(unittest.TestCase):

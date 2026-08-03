@@ -28,7 +28,12 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-APP_TITLE = "YouTube 独立下载器"
+# Shown in the title bar so a bug report says which build it came from. The
+# PowerShell GUI carries the same string; tests/test_downloader.py fails if the
+# two ever disagree.
+VERSION = "1.0.0"
+APP_NAME = "YouTube 独立下载器"
+APP_TITLE = "{} v{}".format(APP_NAME, VERSION)
 HERE = Path(__file__).resolve().parent
 TOOLS_DIR = HERE / "tools"
 
