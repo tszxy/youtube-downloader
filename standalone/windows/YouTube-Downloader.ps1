@@ -731,20 +731,24 @@ $form.Controls.Add($modeGroup)
 
 $script:modeChecks = [ordered]@{}
 $modeIndex = 0
-foreach ($mode in @(
+# $modeSpec, not $mode: this is script scope, where $mode IS the -Mode
+# parameter, and [ValidateSet] is enforced on every assignment to it. Putting a
+# hashtable there throws before the window is ever shown -- which looks to the
+# user like the program flashing up and vanishing. Same for $qualitySpec below.
+foreach ($modeSpec in @(
     @{ Value = "video"; Text = "视频（MP4）" },
     @{ Value = "audio"; Text = "音频（MP3）" },
     @{ Value = "subtitles"; Text = "字幕（SRT）" })) {
     $check = New-Object System.Windows.Forms.CheckBox
-    $check.Text = $mode.Text
-    $check.Tag = $mode.Value
+    $check.Text = $modeSpec.Text
+    $check.Tag = $modeSpec.Value
     $check.AutoSize = $true
     $check.Location = New-Object System.Drawing.Point(16, (30 + 32 * $modeIndex))
-    $check.Checked = ($mode.Value -eq "video")
+    $check.Checked = ($modeSpec.Value -eq "video")
     # The quality group only applies to the video download, so it follows this.
     $check.Add_CheckedChanged({ Update-OptionEnabled })
     $modeGroup.Controls.Add($check)
-    $script:modeChecks[$mode.Value] = $check
+    $script:modeChecks[$modeSpec.Value] = $check
     $modeIndex++
 }
 
@@ -756,19 +760,19 @@ $form.Controls.Add($qualityGroup)
 
 $script:qualityRadios = [ordered]@{}
 $qualityIndex = 0
-foreach ($quality in @(
+foreach ($qualitySpec in @(
     @{ Value = "best"; Text = "最佳画质" },
     @{ Value = "1080"; Text = "最高 1080p" },
     @{ Value = "720"; Text = "最高 720p" },
     @{ Value = "480"; Text = "最高 480p" })) {
     $radio = New-Object System.Windows.Forms.RadioButton
-    $radio.Text = $quality.Text
-    $radio.Tag = $quality.Value
+    $radio.Text = $qualitySpec.Text
+    $radio.Tag = $qualitySpec.Value
     $radio.AutoSize = $true
     $radio.Location = New-Object System.Drawing.Point(16, (26 + 27 * $qualityIndex))
-    $radio.Checked = ($quality.Value -eq "best")
+    $radio.Checked = ($qualitySpec.Value -eq "best")
     $qualityGroup.Controls.Add($radio)
-    $script:qualityRadios[$quality.Value] = $radio
+    $script:qualityRadios[$qualitySpec.Value] = $radio
     $qualityIndex++
 }
 
@@ -780,18 +784,18 @@ $form.Controls.Add($browserGroup)
 
 $script:browserRadios = [ordered]@{}
 $browserIndex = 0
-foreach ($browser in @(
+foreach ($browserSpec in @(
     @{ Value = ""; Text = "不使用" },
     @{ Value = "chrome"; Text = "Chrome" },
     @{ Value = "edge"; Text = "Edge" },
     @{ Value = "firefox"; Text = "Firefox" },
     @{ Value = "brave"; Text = "Brave" })) {
     $radio = New-Object System.Windows.Forms.RadioButton
-    $radio.Text = $browser.Text
-    $radio.Tag = $browser.Value
+    $radio.Text = $browserSpec.Text
+    $radio.Tag = $browserSpec.Value
     $radio.AutoSize = $true
     $radio.Location = New-Object System.Drawing.Point((16 + 100 * [int]($browserIndex -ge 3)), (26 + 27 * ($browserIndex % 3)))
-    $radio.Checked = ($browser.Value -eq "")
+    $radio.Checked = ($browserSpec.Value -eq "")
     # Cookies can be what makes a probe succeed, so switching re-runs it --
     # unless the switch came from Update-OptionEnabled resetting a browser that
     # turns out not to be installed.
@@ -799,7 +803,7 @@ foreach ($browser in @(
         if ($this.Checked -and -not $script:updatingOptions) { Request-VideoProbe }
     })
     $browserGroup.Controls.Add($radio)
-    $script:browserRadios[$browser.Value] = $radio
+    $script:browserRadios[$browserSpec.Value] = $radio
     $browserIndex++
 }
 
@@ -1203,8 +1207,10 @@ if ($SmokeTest) {
 
     # An empty probe must give everything back rather than lock the window down.
     Reset-OptionAvailability "smoke"
-    foreach ($mode in $script:modeChecks.Keys) {
-        if (-not $script:modeChecks[$mode].Enabled) { $failures += "$mode stayed disabled after a reset" }
+    # $modeName for the same reason as $modeSpec above: still script scope here,
+    # since if/else does not open one of its own.
+    foreach ($modeName in $script:modeChecks.Keys) {
+        if (-not $script:modeChecks[$modeName].Enabled) { $failures += "$modeName stayed disabled after a reset" }
     }
 
     # Unticking 视频 greys out the quality group, which only applies to it.

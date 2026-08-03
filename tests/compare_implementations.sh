@@ -27,6 +27,16 @@ strip_env() {
   '
 }
 
+# This runs on Windows in CI, where the two sides disagree about line endings
+# without disagreeing about a single argument: PowerShell writes the embedded
+# newlines of a -join "`n" string as LF and only terminates the last line the
+# platform way, while Python's print() translates every one of them to CRLF.
+# The result is a stray CR on all but the final line. Compare the arguments,
+# not the line terminators.
+strip_cr() {
+  tr -d '\r'
+}
+
 failures=0
 compare() {
   local desc="$1"; shift
@@ -37,9 +47,9 @@ compare() {
 
   local py ps
   py=$("$python_bin" "$root/standalone/youtube_downloader.py" --print-command \
-        -o /tmp/compare "${py_args[@]}" 2>&1 | tail -n +2 | strip_env)
+        -o /tmp/compare "${py_args[@]}" 2>&1 | strip_cr | tail -n +2 | strip_env)
   ps=$("$pwsh_bin" -NoProfile -File "$root/standalone/windows/YouTube-Downloader.ps1" \
-        -PrintCommand -OutputDir /tmp/compare "${ps_args[@]}" 2>&1 | strip_env)
+        -PrintCommand -OutputDir /tmp/compare "${ps_args[@]}" 2>&1 | strip_cr | strip_env)
 
   printf '%-28s ' "$desc"
   if [[ "$py" == "$ps" ]]; then
@@ -57,9 +67,9 @@ compare_probe() {
   local desc="$1" browser="$2"
   local py ps
   py=$("$python_bin" "$root/standalone/youtube_downloader.py" --print-probe-command \
-        "$URL" --cookies-from-browser "$browser" 2>&1 | tail -n +2)
+        "$URL" --cookies-from-browser "$browser" 2>&1 | strip_cr | tail -n +2)
   ps=$("$pwsh_bin" -NoProfile -File "$root/standalone/windows/YouTube-Downloader.ps1" \
-        -PrintProbeCommand -Url "$URL" -CookiesFromBrowser "$browser" 2>&1)
+        -PrintProbeCommand -Url "$URL" -CookiesFromBrowser "$browser" 2>&1 | strip_cr)
 
   printf '%-28s ' "$desc"
   if [[ "$py" == "$ps" ]]; then
