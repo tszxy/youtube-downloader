@@ -65,13 +65,30 @@ class TestGuiBuilds(unittest.TestCase):
         self.yd = load_app()
         self.widgets = []
         self.warnings = []
+        self.asked = []
+        self.answers = []
+        self.quit_calls = []
         self._mainloop = tkinter.Tk.mainloop
         self._showwarning = messagebox.showwarning
+        self._askyesno = messagebox.askyesno
         messagebox.showwarning = lambda *a, **k: self.warnings.append(a)
+        # Unstubbed, the startup Chrome question opens a real modal dialog and
+        # the suite hangs waiting for a human -- but only on a machine slow
+        # enough for the 300ms timer to fire mid-pump, so it would look flaky
+        # rather than broken.
+        messagebox.askyesno = self._answer
+        # No test may consult, let alone close, a real browser.
+        self.yd.chrome_running = lambda: False
+        self.yd.quit_chrome = lambda *a, **k: (self.quit_calls.append(1), True)[1]
+
+    def _answer(self, *args, **kwargs):
+        self.asked.append(args)
+        return self.answers.pop(0) if self.answers else False
 
     def tearDown(self):
         tkinter.Tk.mainloop = self._mainloop
         messagebox.showwarning = self._showwarning
+        messagebox.askyesno = self._askyesno
 
     def pump(self, action=None, cycles=10):
         def fake_mainloop(root):
@@ -358,6 +375,42 @@ class TestGuiBuilds(unittest.TestCase):
         modes = self.run_ticked(["视频（MP4）"], [0], timeout=0.5)
         self.assertEqual(modes, [])
         self.assertTrue(self.warnings, "no warning was shown for an empty selection")
+
+    # --- the startup offer to close Chrome --------------------------------
+    #
+    # The question is posted on a 300ms timer so the window is drawn first,
+    # so these pump past it rather than the few milliseconds the other tests
+    # need.
+
+    def settle(self, predicate, timeout=2.0):
+        """Wait for the quit worker, which runs off the Tk thread."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_a_running_chrome_is_offered_for_closing_at_startup(self):
+        self.yd.chrome_running = lambda: True
+        self.answers.append(True)
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertTrue(self.asked, "the startup Chrome question never appeared")
+        self.assertTrue(self.settle(lambda: self.quit_calls),
+                        "the user said yes and Chrome was left running")
+
+    def test_saying_no_leaves_chrome_running(self):
+        self.yd.chrome_running = lambda: True
+        self.answers.append(False)
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertTrue(self.asked)
+        self.assertFalse(self.quit_calls, "Chrome was closed despite the user declining")
+
+    def test_no_question_when_chrome_is_not_running(self):
+        self.yd.chrome_running = lambda: False
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertFalse(self.asked, "asked about a Chrome that was not running")
+        self.assertFalse(self.quit_calls)
 
 
 if __name__ == "__main__":

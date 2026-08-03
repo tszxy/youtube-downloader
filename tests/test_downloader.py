@@ -433,6 +433,139 @@ class TestBotCheck(unittest.TestCase):
         self.assertIsInstance(seen[0], yd.Download)
 
 
+class TestChromeQuitPrompt(unittest.TestCase):
+    """The startup offer to close Chrome, which locks its own cookie database.
+
+    Every test here stubs both the detection and the killing: a test run must
+    never actually close the browser of whoever is running it.
+    """
+
+    def setUp(self):
+        self.calls = []
+        self.originals = {
+            name: getattr(yd, name) for name in ("chrome_running", "quit_chrome", "_run_quiet")
+        }
+        # Any command reaching _run_quiet is a bug in the test, not a pass.
+        yd._run_quiet = lambda cmd, timeout=15: self.fail(
+            "a real process command escaped the stubs: {}".format(cmd))
+
+    def tearDown(self):
+        for name, value in self.originals.items():
+            setattr(yd, name, value)
+
+    def arrange(self, running, quit_result=True):
+        yd.chrome_running = lambda: running
+        yd.quit_chrome = lambda *a, **kw: self.calls.append("quit") or quit_result
+
+    def offer(self, browser="chrome", answer="y", **kwargs):
+        out = []
+        result = yd.offer_chrome_quit_cli(
+            browser, ask=lambda _prompt: answer, out=out.append, **kwargs)
+        return result, "\n".join(out)
+
+    def test_no_prompt_when_chrome_is_not_running(self):
+        self.arrange(running=False)
+        result, text = self.offer()
+        self.assertFalse(result)
+        self.assertEqual(text, "")
+        self.assertEqual(self.calls, [])
+
+    def test_no_prompt_for_another_browser(self):
+        # Chrome running is irrelevant when its cookies were never requested.
+        self.arrange(running=True)
+        for browser in ("", "firefox", "safari", "edge"):
+            result, text = self.offer(browser=browser)
+            self.assertFalse(result, browser)
+            self.assertEqual(text, "", browser)
+        self.assertEqual(self.calls, [])
+
+    def test_yes_closes_chrome(self):
+        self.arrange(running=True)
+        result, text = self.offer(answer="y")
+        self.assertTrue(result)
+        self.assertEqual(self.calls, ["quit"])
+        self.assertIn("已退出", text)
+
+    def test_answer_is_case_and_space_tolerant(self):
+        for answer in ("Y", " yes ", "YES", "是"):
+            self.calls = []
+            self.arrange(running=True)
+            result, _ = self.offer(answer=answer)
+            self.assertTrue(result, answer)
+
+    def test_no_leaves_chrome_alone_but_warns(self):
+        for answer in ("n", "", "no", "随便"):
+            self.calls = []
+            self.arrange(running=True)
+            result, text = self.offer(answer=answer)
+            self.assertFalse(result, answer)
+            self.assertEqual(self.calls, [], answer)
+            self.assertIn("仍在运行", text)
+
+    def test_failed_quit_is_reported_as_failure(self):
+        self.arrange(running=True, quit_result=False)
+        result, text = self.offer(answer="y")
+        self.assertFalse(result)
+        self.assertIn("没能退出", text)
+
+    def test_interrupted_answer_does_not_kill_anything(self):
+        self.arrange(running=True)
+
+        def refuse(_prompt):
+            raise EOFError
+
+        out = []
+        result = yd.offer_chrome_quit_cli("chrome", ask=refuse, out=out.append)
+        self.assertFalse(result)
+        self.assertEqual(self.calls, [])
+
+    def test_question_explains_why_and_what_is_lost(self):
+        # The dialog is the only place this is explained, so it has to carry
+        # the cause, the upstream issue, and the cost of saying yes.
+        for fragment in ("cookies", "7271", "未保存"):
+            self.assertIn(fragment, yd.CHROME_QUIT_QUESTION)
+
+    def test_process_names_are_present_for_this_platform(self):
+        names = yd.chrome_process_names()
+        self.assertTrue(names)
+        self.assertTrue(all(isinstance(name, str) and name for name in names))
+
+    def test_chrome_running_answers_a_bool_without_raising(self):
+        yd._run_quiet = self.originals["_run_quiet"]
+        yd.chrome_running = self.originals["chrome_running"]
+        self.assertIsInstance(yd.chrome_running(), bool)
+
+    def test_unknown_process_state_reads_as_not_running(self):
+        # pgrep/tasklist missing must not produce an offer to kill Chrome.
+        yd.chrome_running = self.originals["chrome_running"]
+        yd._run_quiet = lambda cmd, timeout=15: None
+        self.assertFalse(yd.chrome_running())
+
+    def test_quit_returns_early_once_chrome_is_gone(self):
+        yd.quit_chrome = self.originals["quit_chrome"]
+        issued = []
+        yd._run_quiet = lambda cmd, timeout=15: issued.append(cmd)
+        yd.chrome_running = lambda: False
+        started = time.monotonic()
+        self.assertTrue(yd.quit_chrome(grace=5))
+        # One polite request, then out -- no waiting on the grace period and
+        # no escalation to a forced kill.
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(len(issued), 1)
+        self.assertNotIn("/F", issued[0])
+        self.assertNotIn("-9", issued[0])
+
+    def test_quit_escalates_only_after_the_grace_period(self):
+        yd.quit_chrome = self.originals["quit_chrome"]
+        issued = []
+        yd._run_quiet = lambda cmd, timeout=15: issued.append(cmd)
+        yd.chrome_running = lambda: True  # never goes away
+        self.assertFalse(yd.quit_chrome(grace=0.5))
+        self.assertGreater(len(issued), 1, "a stubborn Chrome was never escalated")
+        forced = " ".join(" ".join(cmd) for cmd in issued[1:])
+        self.assertTrue("/F" in forced or "-9" in forced)
+
+
 class TestToolDiscovery(unittest.TestCase):
     def test_find_runner_returns_list_or_none(self):
         runner = yd.find_runner()

@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -312,6 +313,103 @@ def browser_available(name):
     if not name:
         return True  # "不使用" is always a valid choice.
     return any(path.is_dir() for path in browser_profile_paths(name))
+
+
+# --------------------------------------------------------------------------
+# Chrome keeps its cookie database locked while it runs
+# --------------------------------------------------------------------------
+
+# yt-dlp fails with "Could not copy Chrome cookie database" (yt-dlp #7271) for
+# as long as Chrome is alive, and closing every window ends no Chrome process
+# on any of the three platforms -- hence a process check, not a window check.
+CHROME_QUIT_GRACE = 8.0
+
+CHROME_QUIT_QUESTION = (
+    "检测到 Chrome 正在运行。\n\n"
+    "Chrome 运行时会独占 cookies 数据库，读取登录状态会失败"
+    "（yt-dlp 已知问题 #7271）；关掉所有窗口并不等于退出。\n\n"
+    "现在退出 Chrome 吗？未保存的网页内容会丢失，下载结束后可以重新打开。"
+)
+
+CHROME_STILL_RUNNING = (
+    "Chrome 仍在运行。如果之后提示读取 cookies 失败，请先彻底退出 Chrome 再重试。"
+)
+
+
+def chrome_process_names():
+    if sys.platform == "darwin":
+        return ["Google Chrome"]
+    if os.name == "nt":
+        return ["chrome.exe"]
+    return ["chrome", "google-chrome", "google-chrome-stable"]
+
+
+def _run_quiet(cmd, timeout=15):
+    """Run a small helper command. None when it could not be run at all."""
+    kwargs = {}
+    if os.name == "nt":
+        # Same reason as probe(): no console window may flash into view.
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, universal_newlines=True,
+            encoding="utf-8", errors="replace", timeout=timeout, **kwargs
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def chrome_running():
+    """True only when a Chrome process is definitely alive.
+
+    "Cannot tell" answers False on purpose: offering to kill a browser that is
+    not running is worse than the failure the offer prevents, and yt-dlp names
+    that failure clearly enough on its own.
+    """
+    if os.name == "nt":
+        result = _run_quiet(["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"])
+        if result is None:
+            return False
+        return "chrome.exe" in (result.stdout or "").lower()
+    for name in chrome_process_names():
+        result = _run_quiet(["pgrep", "-x", name])
+        if result is not None and result.returncode == 0:
+            return True
+    return False
+
+
+def quit_chrome(grace=CHROME_QUIT_GRACE):
+    """Close Chrome, politely first. True when nothing is left running.
+
+    The polite request goes first on every platform: a forced kill loses
+    unsaved tab content and makes Chrome offer to restore the session on its
+    next launch. Only a Chrome that ignores it for `grace` seconds -- usually
+    one holding a "leave site?" dialog -- is killed outright, which is what
+    the user agreed to when they answered yes.
+    """
+    if sys.platform == "darwin":
+        _run_quiet(["osascript", "-e", 'quit app "Google Chrome"'], timeout=grace)
+    elif os.name == "nt":
+        _run_quiet(["taskkill", "/IM", "chrome.exe"], timeout=grace)
+    else:
+        for name in chrome_process_names():
+            _run_quiet(["pkill", "-x", name], timeout=grace)
+
+    deadline = time.monotonic() + grace
+    while True:
+        if not chrome_running():
+            return True
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.3)
+
+    if os.name == "nt":
+        _run_quiet(["taskkill", "/IM", "chrome.exe", "/T", "/F"])
+    else:
+        for name in chrome_process_names():
+            _run_quiet(["pkill", "-9", "-x", name])
+    time.sleep(1.0)
+    return not chrome_running()
 
 
 # --------------------------------------------------------------------------
@@ -629,6 +727,39 @@ def build_parser():
     return parser
 
 
+def offer_chrome_quit_cli(cookies_browser, ask=None, out=print):
+    """The GUI's startup question, for a terminal. True when Chrome was closed.
+
+    Narrower than the GUI on purpose. Only a run that actually asked for Chrome
+    cookies is interrupted, and only when someone is there to answer: a piped
+    or cron-driven run must not block forever on input() over a browser it may
+    not even be using.
+    """
+    if cookies_browser != "chrome" or not chrome_running():
+        return False
+    if ask is None:
+        if not (sys.stdin and sys.stdin.isatty()):
+            out(CHROME_STILL_RUNNING)
+            return False
+        ask = input
+    out(CHROME_QUIT_QUESTION)
+    try:
+        answer = ask("现在退出 Chrome？[y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        out("")
+        out(CHROME_STILL_RUNNING)
+        return False
+    if (answer or "").strip().lower() not in ("y", "yes", "是"):
+        out(CHROME_STILL_RUNNING)
+        return False
+    out("正在退出 Chrome...")
+    if quit_chrome():
+        out("Chrome 已退出。")
+        return True
+    out("Chrome 没能退出，请手动退出后重试。")
+    return False
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -668,6 +799,7 @@ def main(argv=None):
             # spaces, and directly comparable with the PowerShell version.
             print("\n".join(build_command(runner, args.url, **options)))
             return 0
+        offer_chrome_quit_cli(args.cookies_from_browser)
         return run_download(args.url, on_line=print, **options)
     except (ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
@@ -1033,6 +1165,29 @@ def run_gui():
             log.configure(state="disabled")
         state["timer"] = root.after(120, drain)
 
+    def offer_chrome_quit():
+        """Startup question: Chrome cannot be running when cookies are read.
+
+        Asked once, before any URL is typed, because the alternative is
+        discovering it minutes later as a yt-dlp error partway through a run.
+        """
+        if not chrome_running():
+            return
+        if not messagebox.askyesno("Chrome 正在运行", CHROME_QUIT_QUESTION, parent=root):
+            append(CHROME_STILL_RUNNING)
+            return
+        append("正在退出 Chrome...")
+
+        def task():
+            # Off the main thread: quit_chrome waits seconds for Chrome to go,
+            # and waiting inline would freeze the window that asked.
+            if quit_chrome():
+                append("Chrome 已退出，现在可以读取登录状态了。")
+            else:
+                append("Chrome 没能退出，请手动退出后重试。")
+
+        threading.Thread(target=task, daemon=True).start()
+
     def on_close():
         # Cancel the pending drain first: letting it fire after the window is
         # gone makes Tcl raise "invalid command name ...drain".
@@ -1053,6 +1208,9 @@ def run_gui():
     url_var.trace_add("write", schedule_probe)
     url_entry.focus_set()
     state["timer"] = root.after(120, drain)
+    # Deferred rather than called here: the window has to be on screen first,
+    # or the dialog appears in front of nothing and cannot be placed properly.
+    root.after(300, offer_chrome_quit)
     root.mainloop()
     return 0
 
