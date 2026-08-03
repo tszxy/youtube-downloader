@@ -79,8 +79,8 @@ class TestGuiBuilds(unittest.TestCase):
         # rather than broken.
         messagebox.askyesno = self._answer
         # No test may consult, let alone close, a real browser.
-        self.yd.chrome_running = lambda: False
-        self.yd.quit_chrome = lambda *a, **k: (self.quit_calls.append(1), True)[1]
+        self.yd.browser_running = lambda browser: False
+        self.yd.quit_browser = lambda browser, *a, **k: (self.quit_calls.append(browser), True)[1]
         # Present by default, so the startup dependency offer stays out of the
         # way. Left real, a machine without ffmpeg would eat the answer queued
         # for the Chrome question and fail unrelated tests.
@@ -401,20 +401,53 @@ class TestGuiBuilds(unittest.TestCase):
             time.sleep(0.02)
         return False
 
-    def test_a_running_chrome_is_offered_for_closing_at_startup(self):
-        self.yd.chrome_running = lambda: True
+    def select(self, label):
+        """Click a login-source radio by its label and let the offer settle."""
+        def action(root):
+            self.click(root, label)
+            time.sleep(0.3)
+        self.pump(action=action)
+
+    def test_selecting_chrome_offers_to_close_it(self):
+        self.yd.browser_running = lambda browser: browser == "chrome"
         self.answers.append(True)
-        self.pump(action=lambda root: time.sleep(0.4))
-        self.assertTrue(self.asked, "the startup Chrome question never appeared")
-        self.assertTrue(self.settle(lambda: self.quit_calls),
+        self.select("Chrome")
+        self.assertTrue(self.asked, "picking Chrome never offered to close it")
+        self.assertTrue(self.settle(lambda: self.quit_calls == ["chrome"]),
                         "the user said yes and Chrome was left running")
 
-    def test_saying_no_leaves_chrome_running(self):
-        self.yd.chrome_running = lambda: True
+    def test_selecting_edge_offers_to_close_edge(self):
+        # The point of this change: Edge is a first-class fallback, closed and
+        # named as Edge rather than mislabelled Chrome.
+        self.yd.browser_running = lambda browser: browser == "edge"
+        self.answers.append(True)
+        self.select("Edge")
+        self.assertTrue(self.asked, "picking Edge never offered to close it")
+        dialog = " ".join(str(a) for a in self.asked[0])
+        self.assertIn("Edge", dialog)
+        self.assertNotIn("Chrome", dialog)
+        self.assertTrue(self.settle(lambda: self.quit_calls == ["edge"]))
+
+    def test_declining_leaves_the_browser_running(self):
+        self.yd.browser_running = lambda browser: True
         self.answers.append(False)
-        self.pump(action=lambda root: time.sleep(0.4))
+        self.select("Chrome")
         self.assertTrue(self.asked)
-        self.assertFalse(self.quit_calls, "Chrome was closed despite the user declining")
+        self.assertFalse(self.quit_calls, "the browser was closed despite a no")
+
+    def test_a_source_that_is_not_running_is_not_offered(self):
+        self.yd.browser_running = lambda browser: False
+        self.select("Chrome")
+        self.assertFalse(self.asked, "offered to close a browser that was not running")
+        self.assertFalse(self.quit_calls)
+
+    def test_a_non_locking_source_is_never_offered(self):
+        # Firefox does not hold its cookie database open, so selecting it must
+        # not pop the quit dialog even if a "browser" appears to be running.
+        self.yd.browser_running = lambda browser: True
+        self.select("Firefox")
+        self.assertFalse(self.asked, "offered to close Firefox, which never locks")
+        self.assertFalse(self.quit_calls)
 
     # --- the startup dependency check -------------------------------------
 
@@ -451,10 +484,13 @@ class TestGuiBuilds(unittest.TestCase):
         self.assertIn(self.yd.VERSION, self.window_title)
         self.assertIn(self.yd.APP_NAME, self.window_title)
 
-    def test_no_question_when_chrome_is_not_running(self):
-        self.yd.chrome_running = lambda: False
+    def test_startup_alone_asks_nothing_about_browsers(self):
+        # The browser question is now tied to selecting a login source, not to
+        # startup. With dependencies present and nothing selected, opening the
+        # window must pop no dialog at all -- even if a browser is running.
+        self.yd.browser_running = lambda browser: True
         self.pump(action=lambda root: time.sleep(0.4))
-        self.assertFalse(self.asked, "asked about a Chrome that was not running")
+        self.assertFalse(self.asked, "startup popped a browser question on its own")
         self.assertFalse(self.quit_calls)
 
 

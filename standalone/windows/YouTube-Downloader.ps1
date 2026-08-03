@@ -106,30 +106,47 @@ function Stop-ProcessTree([System.Diagnostics.Process]$process) {
     }
 }
 
-# Mirrors chrome_running / quit_chrome / CHROME_QUIT_QUESTION in
+# Mirrors browser_running / quit_browser / browser_quit_question in
 # youtube_downloader.py. A test fails if this file stops carrying them, because
 # the Windows GUI is the one most likely to hit the locked database and the
 # least likely to have a terminal handy for taskkill.
-$script:chromeQuitQuestion = @"
-检测到 Chrome 正在运行。
+#
+# Only Chrome and Edge: the two Chromium login sources that lock the database
+# and the pair the user falls back between. "chrome" -> process name "chrome",
+# window title "Chrome"; "edge" -> "msedge" / "Edge".
+$script:browserProcess = @{ chrome = "chrome"; edge = "msedge" }
+$script:browserDisplay = @{ chrome = "Chrome"; edge = "Edge" }
 
-Chrome 运行时会独占 cookies 数据库，读取登录状态会失败（yt-dlp 已知问题 #7271）；关掉所有窗口并不等于退出。
+function Get-BrowserQuitQuestion([string]$browser) {
+    $name = $script:browserDisplay[$browser]
+    return @"
+检测到 $name 正在运行。
 
-现在退出 Chrome 吗？未保存的网页内容会丢失，下载结束后可以重新打开。
+$name 运行时会独占 cookies 数据库，读取登录状态会失败（yt-dlp 已知问题 #7271）；关掉所有窗口并不等于退出。
+
+现在退出 $name 吗？未保存的网页内容会丢失，下载结束后可以重新打开。
 "@
-$script:chromeStillRunning = "Chrome 仍在运行。如果之后提示读取 cookies 失败，请先彻底退出 Chrome 再重试。"
-
-function Test-ChromeRunning {
-    # Windows keeps Chrome alive after its last window closes whenever "continue
-    # running background apps" is on, which is the default, so ask the process
-    # list rather than the window list.
-    return @(Get-Process -Name "chrome" -ErrorAction SilentlyContinue).Count -gt 0
 }
 
-function Stop-Chrome {
+function Get-BrowserStillRunning([string]$browser) {
+    $name = $script:browserDisplay[$browser]
+    return "$name 仍在运行。如果之后提示读取 cookies 失败，请先彻底退出 $name 再重试。"
+}
+
+function Test-BrowserRunning([string]$browser) {
+    # Windows keeps these browsers alive after their last window closes whenever
+    # "continue running background apps" is on, which is the default, so ask the
+    # process list rather than the window list.
+    if (-not $script:browserProcess.ContainsKey($browser)) { return $false }
+    return @(Get-Process -Name $script:browserProcess[$browser] -ErrorAction SilentlyContinue).Count -gt 0
+}
+
+function Stop-Browser([string]$browser) {
     # Polite first on purpose: a forced kill loses unsaved tab content and makes
-    # Chrome offer to restore the session on its next launch.
-    $running = @(Get-Process -Name "chrome" -ErrorAction SilentlyContinue)
+    # the browser offer to restore the session on its next launch.
+    if (-not $script:browserProcess.ContainsKey($browser)) { return $true }
+    $procName = $script:browserProcess[$browser]
+    $running = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
     if ($running.Count -eq 0) { return $true }
     foreach ($process in $running) {
         try { [void]$process.CloseMainWindow() } catch { }
@@ -137,7 +154,7 @@ function Stop-Chrome {
 
     $deadline = (Get-Date).AddSeconds(8)
     while ((Get-Date) -lt $deadline) {
-        if (-not (Test-ChromeRunning)) { return $true }
+        if (-not (Test-BrowserRunning $browser)) { return $true }
         # The wait happens on the UI thread; without this the window that asked
         # the question freezes for the whole eight seconds.
         [System.Windows.Forms.Application]::DoEvents()
@@ -145,10 +162,32 @@ function Stop-Chrome {
     }
 
     # Ignored the request -- usually a "leave site?" dialog holding it open.
-    # The user already agreed to Chrome going away.
-    & taskkill.exe /IM chrome.exe /T /F 2>&1 | Out-Null
+    # The user already agreed to the browser going away.
+    & taskkill.exe /IM "$procName.exe" /T /F 2>&1 | Out-Null
     Start-Sleep -Milliseconds 700
-    return (-not (Test-ChromeRunning))
+    return (-not (Test-BrowserRunning $browser))
+}
+
+function Invoke-BrowserQuitOffer([string]$browser) {
+    # Ask to close the selected login-source browser, then close it if agreed.
+    # Only Chrome and Edge lock the database; anything else is left alone.
+    if (-not $script:browserProcess.ContainsKey($browser)) { return }
+    if (-not (Test-BrowserRunning $browser)) { return }
+    $name = $script:browserDisplay[$browser]
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        (Get-BrowserQuitQuestion $browser), "$name 正在运行",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Add-Log (Get-BrowserStillRunning $browser)
+        return
+    }
+    Add-Log "正在退出 $name..."
+    if (Stop-Browser $browser) {
+        Add-Log "$name 已退出，现在可以读取登录状态了。"
+    } else {
+        Add-Log "$name 没能退出，请手动退出后重试。"
+    }
 }
 
 function Get-VideoFormat([string]$quality) {
@@ -846,7 +885,12 @@ foreach ($browserSpec in @(
     # unless the switch came from Update-OptionEnabled resetting a browser that
     # turns out not to be installed.
     $radio.Add_CheckedChanged({
-        if ($this.Checked -and -not $script:updatingOptions) { Request-VideoProbe }
+        if ($this.Checked -and -not $script:updatingOptions) {
+            Request-VideoProbe
+            # Picking Chrome or Edge is the moment quitting it starts to matter,
+            # since it locks its own cookie database while running.
+            Invoke-BrowserQuitOffer ([string]$this.Tag)
+        }
     })
     $browserGroup.Controls.Add($radio)
     $script:browserRadios[$browserSpec.Value] = $radio
@@ -1302,25 +1346,9 @@ $form.Add_Shown({
         }
     }
 
-    # Asked after the dependency offer, which is the one that blocks downloading
-    # outright. The install runs redirected in the background, so this question
-    # is not waiting on it.
-    if (Test-ChromeRunning) {
-        $answer = [System.Windows.Forms.MessageBox]::Show(
-            $script:chromeQuitQuestion, "Chrome 正在运行",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Question)
-        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-            Add-Log "正在退出 Chrome..."
-            if (Stop-Chrome) {
-                Add-Log "Chrome 已退出，现在可以读取登录状态了。"
-            } else {
-                Add-Log "Chrome 没能退出，请手动退出后重试。"
-            }
-        } else {
-            Add-Log $script:chromeStillRunning
-        }
-    }
+    # Quitting the login-source browser is offered when it is picked in the
+    # 登录状态来源 radios, not here: none is selected at startup, and with both
+    # Chrome and Edge on offer, prompting about one before it is chosen is noise.
 })
 
 [void]$form.ShowDialog()

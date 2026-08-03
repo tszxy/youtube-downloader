@@ -321,32 +321,49 @@ def browser_available(name):
 
 
 # --------------------------------------------------------------------------
-# Chrome keeps its cookie database locked while it runs
+# Chromium browsers keep their cookie database locked while they run
 # --------------------------------------------------------------------------
 
-# yt-dlp fails with "Could not copy Chrome cookie database" (yt-dlp #7271) for
-# as long as Chrome is alive, and closing every window ends no Chrome process
-# on any of the three platforms -- hence a process check, not a window check.
-CHROME_QUIT_GRACE = 8.0
+# yt-dlp fails with "Could not copy ... cookie database" (yt-dlp #7271) for as
+# long as the browser is alive, and closing every window ends no process on any
+# of the three platforms -- hence a process check, not a window check.
+#
+# Only Chrome and Edge are handled: they are the two Chromium browsers offered
+# as a login source that lock the database, and the pair the user falls back
+# between when one refuses. Firefox does not need quitting, and guessing at the
+# process names of the rest would do more harm than good.
+BROWSER_QUIT_GRACE = 8.0
 
-CHROME_QUIT_QUESTION = (
-    "检测到 Chrome 正在运行。\n\n"
-    "Chrome 运行时会独占 cookies 数据库，读取登录状态会失败"
-    "（yt-dlp 已知问题 #7271）；关掉所有窗口并不等于退出。\n\n"
-    "现在退出 Chrome 吗？未保存的网页内容会丢失，下载结束后可以重新打开。"
-)
-
-CHROME_STILL_RUNNING = (
-    "Chrome 仍在运行。如果之后提示读取 cookies 失败，请先彻底退出 Chrome 再重试。"
-)
+BROWSER_DISPLAY = {"chrome": "Chrome", "edge": "Edge"}
 
 
-def chrome_process_names():
+def browser_process_names(browser):
+    if browser == "edge":
+        if sys.platform == "darwin":
+            return ["Microsoft Edge"]
+        if os.name == "nt":
+            return ["msedge.exe"]
+        return ["msedge", "microsoft-edge", "microsoft-edge-stable"]
     if sys.platform == "darwin":
         return ["Google Chrome"]
     if os.name == "nt":
         return ["chrome.exe"]
     return ["chrome", "google-chrome", "google-chrome-stable"]
+
+
+def browser_quit_question(browser):
+    name = BROWSER_DISPLAY.get(browser, browser)
+    return (
+        "检测到 {0} 正在运行。\n\n"
+        "{0} 运行时会独占 cookies 数据库，读取登录状态会失败"
+        "（yt-dlp 已知问题 #7271）；关掉所有窗口并不等于退出。\n\n"
+        "现在退出 {0} 吗？未保存的网页内容会丢失，下载结束后可以重新打开。".format(name)
+    )
+
+
+def browser_still_running(browser):
+    name = BROWSER_DISPLAY.get(browser, browser)
+    return "{0} 仍在运行。如果之后提示读取 cookies 失败，请先彻底退出 {0} 再重试。".format(name)
 
 
 def _run_quiet(cmd, timeout=15):
@@ -364,57 +381,59 @@ def _run_quiet(cmd, timeout=15):
         return None
 
 
-def chrome_running():
-    """True only when a Chrome process is definitely alive.
+def browser_running(browser):
+    """True only when the given browser's process is definitely alive.
 
     "Cannot tell" answers False on purpose: offering to kill a browser that is
     not running is worse than the failure the offer prevents, and yt-dlp names
     that failure clearly enough on its own.
     """
+    names = browser_process_names(browser)
     if os.name == "nt":
-        result = _run_quiet(["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"])
+        result = _run_quiet(["tasklist", "/FI", "IMAGENAME eq {}".format(names[0]), "/NH"])
         if result is None:
             return False
-        return "chrome.exe" in (result.stdout or "").lower()
-    for name in chrome_process_names():
+        return names[0].lower() in (result.stdout or "").lower()
+    for name in names:
         result = _run_quiet(["pgrep", "-x", name])
         if result is not None and result.returncode == 0:
             return True
     return False
 
 
-def quit_chrome(grace=CHROME_QUIT_GRACE):
-    """Close Chrome, politely first. True when nothing is left running.
+def quit_browser(browser, grace=BROWSER_QUIT_GRACE):
+    """Close the browser, politely first. True when nothing is left running.
 
     The polite request goes first on every platform: a forced kill loses
-    unsaved tab content and makes Chrome offer to restore the session on its
-    next launch. Only a Chrome that ignores it for `grace` seconds -- usually
-    one holding a "leave site?" dialog -- is killed outright, which is what
-    the user agreed to when they answered yes.
+    unsaved tab content and makes the browser offer to restore the session on
+    its next launch. Only a process that ignores it for `grace` seconds --
+    usually one holding a "leave site?" dialog -- is killed outright, which is
+    what the user agreed to when they answered yes.
     """
+    names = browser_process_names(browser)
     if sys.platform == "darwin":
-        _run_quiet(["osascript", "-e", 'quit app "Google Chrome"'], timeout=grace)
+        _run_quiet(["osascript", "-e", 'quit app "{}"'.format(names[0])], timeout=grace)
     elif os.name == "nt":
-        _run_quiet(["taskkill", "/IM", "chrome.exe"], timeout=grace)
+        _run_quiet(["taskkill", "/IM", names[0]], timeout=grace)
     else:
-        for name in chrome_process_names():
+        for name in names:
             _run_quiet(["pkill", "-x", name], timeout=grace)
 
     deadline = time.monotonic() + grace
     while True:
-        if not chrome_running():
+        if not browser_running(browser):
             return True
         if time.monotonic() >= deadline:
             break
         time.sleep(0.3)
 
     if os.name == "nt":
-        _run_quiet(["taskkill", "/IM", "chrome.exe", "/T", "/F"])
+        _run_quiet(["taskkill", "/IM", names[0], "/T", "/F"])
     else:
-        for name in chrome_process_names():
+        for name in names:
             _run_quiet(["pkill", "-9", "-x", name])
     time.sleep(1.0)
-    return not chrome_running()
+    return not browser_running(browser)
 
 
 # --------------------------------------------------------------------------
@@ -732,36 +751,37 @@ def build_parser():
     return parser
 
 
-def offer_chrome_quit_cli(cookies_browser, ask=None, out=print):
-    """The GUI's startup question, for a terminal. True when Chrome was closed.
+def offer_browser_quit_cli(cookies_browser, ask=None, out=print):
+    """The GUI's question, for a terminal. True when the browser was closed.
 
     Narrower than the GUI on purpose. Only a run that actually asked for Chrome
-    cookies is interrupted, and only when someone is there to answer: a piped
-    or cron-driven run must not block forever on input() over a browser it may
-    not even be using.
+    or Edge cookies is interrupted, and only when someone is there to answer: a
+    piped or cron-driven run must not block forever on input() over a browser
+    it may not even be using.
     """
-    if cookies_browser != "chrome" or not chrome_running():
+    if cookies_browser not in BROWSER_DISPLAY or not browser_running(cookies_browser):
         return False
+    name = BROWSER_DISPLAY[cookies_browser]
     if ask is None:
         if not (sys.stdin and sys.stdin.isatty()):
-            out(CHROME_STILL_RUNNING)
+            out(browser_still_running(cookies_browser))
             return False
         ask = input
-    out(CHROME_QUIT_QUESTION)
+    out(browser_quit_question(cookies_browser))
     try:
-        answer = ask("现在退出 Chrome？[y/N] ")
+        answer = ask("现在退出 {}？[y/N] ".format(name))
     except (EOFError, KeyboardInterrupt):
         out("")
-        out(CHROME_STILL_RUNNING)
+        out(browser_still_running(cookies_browser))
         return False
     if (answer or "").strip().lower() not in ("y", "yes", "是"):
-        out(CHROME_STILL_RUNNING)
+        out(browser_still_running(cookies_browser))
         return False
-    out("正在退出 Chrome...")
-    if quit_chrome():
-        out("Chrome 已退出。")
+    out("正在退出 {}...".format(name))
+    if quit_browser(cookies_browser):
+        out("{} 已退出。".format(name))
         return True
-    out("Chrome 没能退出，请手动退出后重试。")
+    out("{} 没能退出，请手动退出后重试。".format(name))
     return False
 
 
@@ -804,7 +824,7 @@ def main(argv=None):
             # spaces, and directly comparable with the PowerShell version.
             print("\n".join(build_command(runner, args.url, **options)))
             return 0
-        offer_chrome_quit_cli(args.cookies_from_browser)
+        offer_browser_quit_cli(args.cookies_from_browser)
         return run_download(args.url, on_line=print, **options)
     except (ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
@@ -893,7 +913,7 @@ def run_gui():
     browser_buttons = {}
     for index, (value, label) in enumerate(BROWSER_LABELS):
         button = ttk.Radiobutton(browser_group, text=label, value=value, variable=browser_var,
-                                 command=lambda: schedule_probe())
+                                 command=lambda: on_browser_selected())
         button.grid(row=index % 3, column=index // 3, sticky="w", padx=(0, 12))
         browser_buttons[value] = button
 
@@ -1194,32 +1214,42 @@ def run_gui():
             append("缺少 {}。可以随时点「安装/更新依赖」。".format(joined))
 
     def on_startup():
-        # Dependencies first: that is the one that stops a download outright.
+        # Only dependencies at startup. Quitting the login-source browser is
+        # offered when that browser is picked, since none is selected yet here.
         offer_missing_dependencies()
-        offer_chrome_quit()
 
-    def offer_chrome_quit():
-        """Startup question: Chrome cannot be running when cookies are read.
+    def offer_browser_quit(browser):
+        """Ask to close the login-source browser, which locks its own cookies.
 
-        Asked once, before any URL is typed, because the alternative is
-        discovering it minutes later as a yt-dlp error partway through a run.
+        Driven by the login-source selection rather than startup: with two
+        browsers to choose between, the moment you pick one is when quitting it
+        starts to matter, and prompting about the other would be noise. Only
+        Chrome and Edge lock the database, so only those are offered.
         """
-        if not chrome_running():
+        if browser not in BROWSER_DISPLAY or not browser_running(browser):
             return
-        if not messagebox.askyesno("Chrome 正在运行", CHROME_QUIT_QUESTION, parent=root):
-            append(CHROME_STILL_RUNNING)
+        name = BROWSER_DISPLAY[browser]
+        if not messagebox.askyesno(
+                "{} 正在运行".format(name), browser_quit_question(browser), parent=root):
+            append(browser_still_running(browser))
             return
-        append("正在退出 Chrome...")
+        append("正在退出 {}...".format(name))
 
         def task():
-            # Off the main thread: quit_chrome waits seconds for Chrome to go,
-            # and waiting inline would freeze the window that asked.
-            if quit_chrome():
-                append("Chrome 已退出，现在可以读取登录状态了。")
+            # Off the main thread: quit_browser waits seconds for the browser to
+            # go, and waiting inline would freeze the window that asked.
+            if quit_browser(browser):
+                append("{} 已退出，现在可以读取登录状态了。".format(name))
             else:
-                append("Chrome 没能退出，请手动退出后重试。")
+                append("{} 没能退出，请手动退出后重试。".format(name))
 
         threading.Thread(target=task, daemon=True).start()
+
+    def on_browser_selected():
+        # The login-source radios call this: re-probe with the new cookie
+        # source, then offer to quit it if it holds its database open.
+        schedule_probe()
+        offer_browser_quit(browser_var.get())
 
     def on_close():
         # Cancel the pending drain first: letting it fire after the window is

@@ -434,17 +434,18 @@ class TestBotCheck(unittest.TestCase):
         self.assertIsInstance(seen[0], yd.Download)
 
 
-class TestChromeQuitPrompt(unittest.TestCase):
-    """The startup offer to close Chrome, which locks its own cookie database.
+class TestBrowserQuitPrompt(unittest.TestCase):
+    """The offer to close the login-source browser, which locks its cookies.
 
-    Every test here stubs both the detection and the killing: a test run must
-    never actually close the browser of whoever is running it.
+    Covers both Chrome and Edge, the two Chromium sources that hold the
+    database open. Every test stubs both the detection and the killing: a test
+    run must never actually close the browser of whoever is running it.
     """
 
     def setUp(self):
         self.calls = []
         self.originals = {
-            name: getattr(yd, name) for name in ("chrome_running", "quit_chrome", "_run_quiet")
+            name: getattr(yd, name) for name in ("browser_running", "quit_browser", "_run_quiet")
         }
         # Any command reaching _run_quiet is a bug in the test, not a pass.
         yd._run_quiet = lambda cmd, timeout=15: self.fail(
@@ -455,26 +456,29 @@ class TestChromeQuitPrompt(unittest.TestCase):
             setattr(yd, name, value)
 
     def arrange(self, running, quit_result=True):
-        yd.chrome_running = lambda: running
-        yd.quit_chrome = lambda *a, **kw: self.calls.append("quit") or quit_result
+        yd.browser_running = lambda browser: running
+        yd.quit_browser = lambda browser, *a, **kw: self.calls.append(browser) or quit_result
 
     def offer(self, browser="chrome", answer="y", **kwargs):
         out = []
-        result = yd.offer_chrome_quit_cli(
+        result = yd.offer_browser_quit_cli(
             browser, ask=lambda _prompt: answer, out=out.append, **kwargs)
         return result, "\n".join(out)
 
-    def test_no_prompt_when_chrome_is_not_running(self):
-        self.arrange(running=False)
-        result, text = self.offer()
-        self.assertFalse(result)
-        self.assertEqual(text, "")
-        self.assertEqual(self.calls, [])
+    def test_no_prompt_when_browser_is_not_running(self):
+        for browser in ("chrome", "edge"):
+            self.calls = []
+            self.arrange(running=False)
+            result, text = self.offer(browser=browser)
+            self.assertFalse(result, browser)
+            self.assertEqual(text, "", browser)
+            self.assertEqual(self.calls, [])
 
-    def test_no_prompt_for_another_browser(self):
-        # Chrome running is irrelevant when its cookies were never requested.
+    def test_no_prompt_for_a_source_that_does_not_lock(self):
+        # "" / firefox / safari never hold the database open the way the two
+        # Chromium browsers do, so they are never offered for closing.
         self.arrange(running=True)
-        for browser in ("", "firefox", "safari", "edge"):
+        for browser in ("", "firefox", "safari"):
             result, text = self.offer(browser=browser)
             self.assertFalse(result, browser)
             self.assertEqual(text, "", browser)
@@ -482,10 +486,20 @@ class TestChromeQuitPrompt(unittest.TestCase):
 
     def test_yes_closes_chrome(self):
         self.arrange(running=True)
-        result, text = self.offer(answer="y")
+        result, text = self.offer(browser="chrome", answer="y")
         self.assertTrue(result)
-        self.assertEqual(self.calls, ["quit"])
-        self.assertIn("已退出", text)
+        self.assertEqual(self.calls, ["chrome"])
+        self.assertIn("Chrome 已退出", text)
+
+    def test_yes_closes_edge(self):
+        # The whole point of the request: Edge gets the same treatment as
+        # Chrome, named as Edge rather than mislabelled.
+        self.arrange(running=True)
+        result, text = self.offer(browser="edge", answer="y")
+        self.assertTrue(result)
+        self.assertEqual(self.calls, ["edge"])
+        self.assertIn("Edge 已退出", text)
+        self.assertNotIn("Chrome", text)
 
     def test_answer_is_case_and_space_tolerant(self):
         for answer in ("Y", " yes ", "YES", "是"):
@@ -494,14 +508,14 @@ class TestChromeQuitPrompt(unittest.TestCase):
             result, _ = self.offer(answer=answer)
             self.assertTrue(result, answer)
 
-    def test_no_leaves_chrome_alone_but_warns(self):
+    def test_no_leaves_the_browser_alone_but_warns(self):
         for answer in ("n", "", "no", "随便"):
             self.calls = []
             self.arrange(running=True)
-            result, text = self.offer(answer=answer)
+            result, text = self.offer(browser="edge", answer=answer)
             self.assertFalse(result, answer)
             self.assertEqual(self.calls, [], answer)
-            self.assertIn("仍在运行", text)
+            self.assertIn("Edge 仍在运行", text)
 
     def test_failed_quit_is_reported_as_failure(self):
         self.arrange(running=True, quit_result=False)
@@ -516,39 +530,47 @@ class TestChromeQuitPrompt(unittest.TestCase):
             raise EOFError
 
         out = []
-        result = yd.offer_chrome_quit_cli("chrome", ask=refuse, out=out.append)
+        result = yd.offer_browser_quit_cli("chrome", ask=refuse, out=out.append)
         self.assertFalse(result)
         self.assertEqual(self.calls, [])
 
     def test_question_explains_why_and_what_is_lost(self):
         # The dialog is the only place this is explained, so it has to carry
-        # the cause, the upstream issue, and the cost of saying yes.
-        for fragment in ("cookies", "7271", "未保存"):
-            self.assertIn(fragment, yd.CHROME_QUIT_QUESTION)
+        # the cause, the upstream issue, the cost of saying yes, and the right
+        # browser name.
+        for browser, name in (("chrome", "Chrome"), ("edge", "Edge")):
+            question = yd.browser_quit_question(browser)
+            for fragment in ("cookies", "7271", "未保存", name):
+                self.assertIn(fragment, question, browser)
 
-    def test_process_names_are_present_for_this_platform(self):
-        names = yd.chrome_process_names()
-        self.assertTrue(names)
-        self.assertTrue(all(isinstance(name, str) and name for name in names))
+    def test_process_names_differ_between_chrome_and_edge(self):
+        chrome = yd.browser_process_names("chrome")
+        edge = yd.browser_process_names("edge")
+        for names in (chrome, edge):
+            self.assertTrue(names)
+            self.assertTrue(all(isinstance(name, str) and name for name in names))
+        self.assertNotEqual(chrome, edge, "Chrome and Edge resolved to the same process")
 
-    def test_chrome_running_answers_a_bool_without_raising(self):
+    def test_running_answers_a_bool_without_raising(self):
         yd._run_quiet = self.originals["_run_quiet"]
-        yd.chrome_running = self.originals["chrome_running"]
-        self.assertIsInstance(yd.chrome_running(), bool)
+        yd.browser_running = self.originals["browser_running"]
+        for browser in ("chrome", "edge"):
+            self.assertIsInstance(yd.browser_running(browser), bool)
 
     def test_unknown_process_state_reads_as_not_running(self):
-        # pgrep/tasklist missing must not produce an offer to kill Chrome.
-        yd.chrome_running = self.originals["chrome_running"]
+        # pgrep/tasklist missing must not produce an offer to kill anything.
+        yd.browser_running = self.originals["browser_running"]
         yd._run_quiet = lambda cmd, timeout=15: None
-        self.assertFalse(yd.chrome_running())
+        self.assertFalse(yd.browser_running("chrome"))
+        self.assertFalse(yd.browser_running("edge"))
 
-    def test_quit_returns_early_once_chrome_is_gone(self):
-        yd.quit_chrome = self.originals["quit_chrome"]
+    def test_quit_returns_early_once_the_browser_is_gone(self):
+        yd.quit_browser = self.originals["quit_browser"]
         issued = []
         yd._run_quiet = lambda cmd, timeout=15: issued.append(cmd)
-        yd.chrome_running = lambda: False
+        yd.browser_running = lambda browser: False
         started = time.monotonic()
-        self.assertTrue(yd.quit_chrome(grace=5))
+        self.assertTrue(yd.quit_browser("edge", grace=5))
         # One polite request, then out -- no waiting on the grace period and
         # no escalation to a forced kill.
         self.assertLess(time.monotonic() - started, 2)
@@ -557,12 +579,12 @@ class TestChromeQuitPrompt(unittest.TestCase):
         self.assertNotIn("-9", issued[0])
 
     def test_quit_escalates_only_after_the_grace_period(self):
-        yd.quit_chrome = self.originals["quit_chrome"]
+        yd.quit_browser = self.originals["quit_browser"]
         issued = []
         yd._run_quiet = lambda cmd, timeout=15: issued.append(cmd)
-        yd.chrome_running = lambda: True  # never goes away
-        self.assertFalse(yd.quit_chrome(grace=0.5))
-        self.assertGreater(len(issued), 1, "a stubborn Chrome was never escalated")
+        yd.browser_running = lambda browser: True  # never goes away
+        self.assertFalse(yd.quit_browser("chrome", grace=0.5))
+        self.assertGreater(len(issued), 1, "a stubborn browser was never escalated")
         forced = " ".join(" ".join(cmd) for cmd in issued[1:])
         self.assertTrue("/F" in forced or "-9" in forced)
 
@@ -609,16 +631,22 @@ class TestWindowsParity(unittest.TestCase):
     def setUp(self):
         self.source = self.PS1.read_text(encoding="utf-8")
 
-    def test_chrome_is_detected_and_can_be_closed(self):
-        for needed in ("Test-ChromeRunning", "Stop-Chrome", "7271"):
+    def test_browser_is_detected_and_can_be_closed(self):
+        for needed in ("Test-BrowserRunning", "Stop-Browser", "Invoke-BrowserQuitOffer", "7271"):
             self.assertIn(needed, self.source,
-                          "the PowerShell GUI lost the Chrome check: " + needed)
+                          "the PowerShell GUI lost the browser check: " + needed)
 
-    def test_chrome_is_asked_about_politely_before_being_forced(self):
+    def test_both_chrome_and_edge_are_handled(self):
+        # Edge is the fallback when Chrome refuses, so it must lock-quit too.
+        for token in ("chrome", "edge", "msedge"):
+            self.assertIn(token, self.source,
+                          "the PowerShell GUI does not handle " + token)
+
+    def test_browser_is_asked_about_politely_before_being_forced(self):
         # CloseMainWindow before taskkill /F: the reverse loses unsaved tabs
-        # without ever asking Chrome to close itself.
+        # without ever asking the browser to close itself.
         self.assertLess(self.source.index("CloseMainWindow"),
-                        self.source.index("taskkill.exe /IM chrome.exe"))
+                        self.source.index("taskkill.exe /IM"))
 
     def test_startup_offers_whatever_is_missing(self):
         shown = self.source.index("$form.Add_Shown")

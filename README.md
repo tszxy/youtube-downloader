@@ -181,13 +181,14 @@ python3 standalone/youtube_downloader.py "URL" --cookies-from-browser chrome
 Chrome 运行时会独占 cookies 数据库，yt-dlp 读不到。**关掉所有窗口不等于退出**——
 Chrome 默认还会在后台常驻。
 
-> **图形界面会替你处理这一步。** 启动时如果检测到 Chrome 正在运行，会弹窗问你
-> 要不要现在退出它；选「是」就自动退出，选「否」则什么都不做。命令行只在
-> 加了 `--cookies-from-browser chrome` 且在终端里交互运行时才会问，管道和
-> 定时任务里不会卡住等输入。
+> **图形界面会替你处理这一步。** 在「登录状态来源」里选中 Chrome 或 Edge 时，
+> 如果它正在运行，会弹窗问你要不要现在退出它；选「是」就自动退出，选「否」
+> 则什么都不做。命令行只在加了 `--cookies-from-browser chrome`（或 `edge`）
+> 且在终端里交互运行时才会问，管道和定时任务里不会卡住等输入。
 >
-> 退出是先礼后兵：先正常请求退出（不丢已保存的会话），只有 Chrome 在 8 秒内
-> 没反应——通常是卡在「确定要离开此页面吗」的弹窗上——才强制结束。
+> Chrome 和 Edge 都这样处理 —— 两个都是 Chromium，运行时都会锁住自己的
+> cookies 库。退出是先礼后兵：先正常请求退出（不丢已保存的会话），只有它在
+> 8 秒内没反应——通常是卡在「确定要离开此页面吗」的弹窗上——才强制结束。
 > 无论哪种方式，未保存的网页内容都会丢失。
 
 下面是手动退出的办法，选「否」或想自己动手时用得上。
@@ -212,10 +213,16 @@ taskkill /IM chrome.exe /F
 
 **Linux：** 同样确认没有残留进程，`pkill chrome` 即可。
 
-### 前提三：换个浏览器往往更省事
+### 前提三：Chrome 不行就换 Edge
 
-**Firefox 通常不需要退出**就能读到 cookies，是最省心的选择。
-Windows 上 Edge 和 Chrome 的行为一样，也要彻底退出。
+Chrome 有时读不到（比如 Windows 上新版 Chrome 的
+[App-Bound Encryption](https://github.com/yt-dlp/yt-dlp/issues/10927) 会挡住
+外部程序解密 cookies）。这种时候在「登录状态来源」里改选 **Edge** 再试 ——
+Edge 是 Windows 自带的，不用另装,前提是 Edge 里也登录了 YouTube。图形界面
+对 Edge 和 Chrome 一视同仁：选中时同样会问你要不要退出它。
+
+Edge 同为 Chromium，Windows 上可能有一样的加密限制，不保证一定成 —— 但它是
+零成本的第二选择，值得一试。
 
 ### 还是不行
 
