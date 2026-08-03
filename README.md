@@ -12,6 +12,9 @@
 - 中英文人工字幕和自动字幕，转换为 SRT
 - YouTube Shorts、播放列表
 - 可选读取浏览器登录状态（Chrome / Edge / Firefox / Brave / Safari 等）
+- 图形界面里所有选项平铺可见，填入链接后自动检测这个视频能提供什么，
+  给不出的选项直接置灰（详见[图形界面](#图形界面)）
+- 下载类型可多选：视频、音频、字幕勾几个就依次下几个
 - 分片并发下载，明显快于串行
 - 默认不覆盖已有文件
 - 取消时连同 ffmpeg 子进程一起结束，不留孤儿进程
@@ -63,7 +66,7 @@ standalone\Run-Windows.bat
 如果 Windows 拦下 `.bat`：右键 → 属性 → 勾选"解除锁定"。
 
 > 第一次下载多半会撞上 `Sign in to confirm you're not a bot`。
-> 解决办法是在「浏览器登录状态」里选 Chrome，**并且先彻底退出 Chrome 进程**——
+> 解决办法是在「登录状态来源」里选 Chrome，**并且先彻底退出 Chrome 进程**——
 > 关窗口不算。详见[下面这一节](#遇到-sign-in-to-confirm-youre-not-a-bot)。
 
 ### Linux
@@ -75,6 +78,30 @@ cd standalone
 ./run-linux.sh                       # 图形界面
 ./run-linux.sh "https://youtu.be/VIDEO_ID" -o ~/Downloads   # 命令行
 ```
+
+## 图形界面
+
+三个平台的窗口布局一致（macOS/Linux 是 Python 版，Windows 另有一份 PowerShell 版）：
+
+- **下载类型（可多选）**：视频（MP4）、音频（MP3）、字幕（SRT）。勾多个就按顺序
+  一个一个下——yt-dlp 一次只接受一种类型，同时请求同一个视频反而更容易触发限流。
+  中途取消会连同还没开始的那几个一起停掉。
+- **视频画质（单选）**：只作用于视频下载，没勾「视频」时整组置灰。
+- **登录状态来源（单选）**：默认「不使用」。系统里没装的浏览器直接置灰，
+  免得选了之后在 yt-dlp 内部报一句看不懂的错。
+- **其他**：整个播放列表、「重新检测」。
+
+选项不再藏在下拉框里，因为关着的下拉框既看不见有什么，也没地方标注某个选项对这个
+视频不可用。
+
+**自动检测**：链接填好（或粘贴完）约 0.7 秒后，会用 `--dump-single-json` 问一次
+yt-dlp 这个视频有什么，然后把给不出的选项置灰：只有 720p 的视频不会让你选 1080p，
+没有中英字幕的视频不会让你勾字幕。切换登录状态来源会重新检测，因为 cookies 有时
+正是检测能不能成功的关键。手动重来点「重新检测」。
+
+**检测不出来一律算「可用」**：检测失败、超时、或者 yt-dlp 没报告某项信息时，
+选项保持全部可选，绝不会因为检测不出来而挡掉一个本来能成功的下载。
+检测结果和失败原因显示在选项下方那一行。
 
 ## 命令行参数
 
@@ -88,6 +115,7 @@ python3 standalone/youtube_downloader.py URL [选项]
       --cookies-from-browser NAME    使用浏览器登录状态
       --install                      下载便携版 yt-dlp 到 tools/
       --print-command                只打印将要执行的参数，不下载
+      --print-probe-command          只打印图形界面用来检测可用选项的参数，不下载
 ```
 
 例子：
@@ -129,7 +157,7 @@ Use --cookies-from-browser or --cookies for the authentication.
 
 办法是借用浏览器里已登录的身份：
 
-- **图形界面**：「浏览器登录状态」下拉框选 Chrome（默认是「不使用」），再点开始下载
+- **图形界面**：在「登录状态来源」里选 Chrome（默认是「不使用」），再点开始下载
 - **命令行**：加 `--cookies-from-browser chrome`
 
 ```bash
@@ -199,15 +227,20 @@ plugins/                     可选的 Codex 插件，同样转发给 standalone
 tests/                       单元测试 + 两份实现的等价性验证
 ```
 
-只有两处会构造 yt-dlp 命令：`youtube_downloader.py` 的 `build_command()` 和
-PowerShell 版的 `Build-YtDlpArgumentList`。后者存在的唯一理由是让没装 Python 的
-Windows 用户也能双击运行。`tests/compare_implementations.sh` 在 CI 中逐场景比对
-两者生成的参数，任何不一致都会让构建失败。
+只有两处会构造 yt-dlp 命令：`youtube_downloader.py` 的 `build_command()` /
+`probe_command()`，和 PowerShell 版的 `Build-YtDlpArgumentList` /
+`Build-ProbeArgumentList`。后者存在的唯一理由是让没装 Python 的 Windows 用户也能
+双击运行。`tests/compare_implementations.sh` 在 CI 中逐场景比对两者生成的参数
+（下载和检测都比），任何不一致都会让构建失败。
+
+判断哪些选项可用的逻辑同样是两份：`available_options()` 和 `Get-AvailableOption`。
+两边用同一组 JSON 样本断言同样的结果——Python 在 `tests/test_downloader.py`，
+PowerShell 在 `YouTube-Downloader.ps1 -SmokeTest` 里，两个窗口因此置灰同样的东西。
 
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests -v     # 37 个测试（含 GUI 冒烟测试）
+python3 -m unittest discover -s tests -v     # 61 个测试（含 GUI 冒烟测试）
 ./tests/compare_implementations.sh pwsh      # 两份实现的等价性（需要 pwsh）
 ```
 

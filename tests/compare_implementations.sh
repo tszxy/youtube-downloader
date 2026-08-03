@@ -51,6 +51,26 @@ compare() {
   fi
 }
 
+compare_probe() {
+  # The probe is what the window uses to decide which options a video can
+  # deliver, so the two windows must ask yt-dlp the same question.
+  local desc="$1" browser="$2"
+  local py ps
+  py=$("$python_bin" "$root/standalone/youtube_downloader.py" --print-probe-command \
+        "$URL" --cookies-from-browser "$browser" 2>&1 | tail -n +2)
+  ps=$("$pwsh_bin" -NoProfile -File "$root/standalone/windows/YouTube-Downloader.ps1" \
+        -PrintProbeCommand -Url "$URL" -CookiesFromBrowser "$browser" 2>&1)
+
+  printf '%-28s ' "$desc"
+  if [[ "$py" == "$ps" ]]; then
+    echo "一致"
+  else
+    echo "不一致"
+    diff <(printf '%s\n' "$ps") <(printf '%s\n' "$py") | sed 's/^/    /'
+    failures=$((failures + 1))
+  fi
+}
+
 URL="https://youtu.be/ID"
 
 compare "video best"      "$URL" -- -Url "$URL"
@@ -63,6 +83,9 @@ compare "playlist"        "$URL" --playlist -- -Url "$URL" -Playlist
 compare "cookies chrome"  "$URL" --cookies-from-browser chrome -- -Url "$URL" -CookiesFromBrowser chrome
 compare "cookies firefox" "$URL" --cookies-from-browser firefox -- -Url "$URL" -CookiesFromBrowser firefox
 compare "720 + playlist"  "$URL" --quality 720 --playlist -- -Url "$URL" -Quality 720 -Playlist
+
+compare_probe "probe"         ""
+compare_probe "probe + chrome" "chrome"
 
 echo
 if [[ $failures -eq 0 ]]; then

@@ -152,6 +152,138 @@ class TestCommandBuilding(unittest.TestCase):
         self.assertEqual(args[:3], ["python3", "-m", "yt_dlp"])
 
 
+class TestProbeCommand(unittest.TestCase):
+    def test_asks_for_json_without_downloading(self):
+        args = yd.probe_command(RUNNER, URL)
+        self.assertIn("--dump-single-json", args)
+        self.assertIn("--skip-download", args)
+        self.assertIn("--no-playlist", args)
+        self.assertEqual(args[-1], URL)
+
+    def test_rejects_other_hosts(self):
+        with self.assertRaises(ValueError):
+            yd.probe_command(RUNNER, "https://vimeo.com/x")
+
+    def test_cookies_browser_is_passed_through(self):
+        args = yd.probe_command(RUNNER, URL, "firefox")
+        self.assertEqual(args[args.index("--cookies-from-browser") + 1], "firefox")
+
+    def test_bot_check_becomes_actionable_advice(self):
+        message = yd.probe_error("ERROR: [youtube] ID: Sign in to confirm you are not a bot.")
+        self.assertIn("登录状态来源", message)
+
+    def test_other_failures_are_reported_verbatim(self):
+        self.assertIn("Video unavailable", yd.probe_error("ERROR: Video unavailable"))
+        self.assertIn("退出代码", yd.probe_error("", 42))
+
+
+class TestAvailableOptions(unittest.TestCase):
+    """What the window may offer for a given video.
+
+    The same JSON shapes are asserted in the PowerShell smoke test, so the two
+    windows grey out the same things.
+    """
+
+    SAMPLE_720 = {
+        "title": "probe sample",
+        "formats": [
+            {"height": 720, "acodec": "none"},
+            {"height": 360, "acodec": "none"},
+            {"height": None, "acodec": "mp4a.40.2"},
+        ],
+        "subtitles": {"en": [{"ext": "vtt"}]},
+        "automatic_captions": {},
+    }
+
+    def test_a_cap_above_the_video_is_not_offered(self):
+        available = yd.available_options(self.SAMPLE_720)
+        self.assertFalse(available["qualities"]["1080"])
+        self.assertTrue(available["qualities"]["720"])
+        self.assertTrue(available["qualities"]["480"])
+        self.assertTrue(available["qualities"]["best"])
+
+    def test_modes_follow_the_tracks_that_exist(self):
+        available = yd.available_options(self.SAMPLE_720)
+        self.assertTrue(available["modes"]["video"])
+        self.assertTrue(available["modes"]["audio"])
+        self.assertTrue(available["modes"]["subtitles"])
+
+    def test_subtitles_only_count_in_the_languages_we_ask_for(self):
+        # --sub-langs is an exact list, so a Japanese-only video would download
+        # nothing at all.
+        japanese = dict(self.SAMPLE_720, subtitles={}, automatic_captions={"ja": []})
+        self.assertFalse(yd.available_options(japanese)["modes"]["subtitles"])
+        for language in yd.SUB_LANGS:
+            with self.subTest(language=language):
+                one = dict(self.SAMPLE_720, subtitles={language: []}, automatic_captions={})
+                self.assertTrue(yd.available_options(one)["modes"]["subtitles"])
+
+    def test_audio_only_video_offers_no_video(self):
+        podcast = {"formats": [{"height": None, "acodec": "mp4a.40.2"}]}
+        available = yd.available_options(podcast)
+        self.assertFalse(available["modes"]["video"])
+        self.assertTrue(available["modes"]["audio"])
+        self.assertFalse(available["qualities"]["best"])
+
+    def test_a_zero_height_is_not_a_video_track(self):
+        # Get-AvailableOption takes only positive heights; both halves have to
+        # agree, or the two windows grey out different things.
+        available = yd.available_options({"formats": [{"height": 0, "acodec": "mp4a.40.2"}]})
+        self.assertFalse(available["modes"]["video"])
+        self.assertTrue(available["modes"]["audio"])
+
+    def test_a_cap_with_nothing_at_or_below_it_is_not_offered(self):
+        # A single 1080p track cannot be capped to 720p.
+        available = yd.available_options({"formats": [{"height": 1080, "acodec": "none"}]})
+        self.assertTrue(available["qualities"]["1080"])
+        self.assertFalse(available["qualities"]["720"])
+
+    def test_a_probe_that_says_nothing_takes_nothing_away(self):
+        for info in ({}, {"formats": []}, {"formats": None}):
+            with self.subTest(info=info):
+                available = yd.available_options(info)
+                self.assertTrue(all(available["modes"][mode] for mode in ("video", "audio")))
+                self.assertTrue(all(available["qualities"].values()))
+
+    def test_summary_names_the_best_height(self):
+        summary = yd.options_summary(yd.available_options(self.SAMPLE_720))
+        self.assertIn("最高 720p", summary)
+        self.assertIn("有音频", summary)
+        self.assertIn("有中/英字幕", summary)
+
+
+class TestBrowserDetection(unittest.TestCase):
+    def test_no_browser_is_always_a_valid_choice(self):
+        self.assertTrue(yd.browser_available(""))
+
+    def test_every_supported_browser_has_a_place_to_look(self):
+        # Safari is the exception: it does not exist off macOS.
+        for name in yd.BROWSERS:
+            with self.subTest(browser=name):
+                paths = yd.browser_profile_paths(name)
+                if name == "safari" and sys.platform != "darwin":
+                    self.assertEqual(paths, [])
+                else:
+                    self.assertTrue(paths, "nowhere to look for {}".format(name))
+
+    def test_a_missing_profile_reads_as_unavailable(self):
+        original = yd.browser_profile_paths
+        yd.browser_profile_paths = lambda name: [Path(tempfile.gettempdir()) / "no-such-browser"]
+        try:
+            self.assertFalse(yd.browser_available("chrome"))
+        finally:
+            yd.browser_profile_paths = original
+
+    def test_an_existing_profile_reads_as_available(self):
+        original = yd.browser_profile_paths
+        with tempfile.TemporaryDirectory() as tmp:
+            yd.browser_profile_paths = lambda name: [Path(tmp)]
+            try:
+                self.assertTrue(yd.browser_available("chrome"))
+            finally:
+                yd.browser_profile_paths = original
+
+
 class TestProgressParsing(unittest.TestCase):
     def test_matches_yt_dlp_progress_lines(self):
         cases = {
@@ -183,6 +315,13 @@ class TestCli(unittest.TestCase):
         # The output template contains a space and must survive as one line.
         template = lines[lines.index("--output") + 1]
         self.assertTrue(template.endswith("%(title)s [%(id)s].%(ext)s"))
+
+    def test_print_probe_command_asks_yt_dlp_for_json(self):
+        result = self.run_cli(URL, "--print-probe-command")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.strip().split("\n")
+        self.assertIn("--dump-single-json", lines)
+        self.assertEqual(lines[-1], URL)
 
     def test_url_flag_is_equivalent_to_positional(self):
         a = self.run_cli(URL, "--print-command", "-o", "/tmp/x").stdout
