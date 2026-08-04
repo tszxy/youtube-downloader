@@ -127,6 +127,20 @@ class TestCommandBuilding(unittest.TestCase):
 
     def test_no_cookies_flag_when_unset(self):
         self.assertNotIn("--cookies-from-browser", args_for())
+        self.assertNotIn("--cookies", args_for())
+
+    def test_cookies_file_is_passed_through(self):
+        # The Windows escape hatch (yt-dlp #10927): an exported file, read
+        # directly, no browser database to decrypt.
+        args = args_for(cookies_file="/path/to/cookies.txt")
+        self.assertEqual(args[args.index("--cookies") + 1], "/path/to/cookies.txt")
+        self.assertNotIn("--cookies-from-browser", args)
+
+    def test_cookies_file_and_browser_are_mutually_exclusive(self):
+        # yt-dlp takes one cookie source; sending both is a command it rejects,
+        # so the builder refuses to construct it.
+        with self.assertRaises(ValueError):
+            args_for(cookies_browser="chrome", cookies_file="/path/to/cookies.txt")
 
     def test_concurrent_fragments_always_set(self):
         for mode in yd.MODES:
@@ -168,6 +182,12 @@ class TestProbeCommand(unittest.TestCase):
     def test_cookies_browser_is_passed_through(self):
         args = yd.probe_command(RUNNER, URL, "firefox")
         self.assertEqual(args[args.index("--cookies-from-browser") + 1], "firefox")
+
+    def test_cookies_file_is_passed_through(self):
+        # The probe must carry the same identity as the download, or it reports
+        # a video blocked that the download would in fact reach.
+        args = yd.probe_command(RUNNER, URL, cookies_file="/path/cookies.txt")
+        self.assertEqual(args[args.index("--cookies") + 1], "/path/cookies.txt")
 
     def test_bot_check_becomes_actionable_advice(self):
         message = yd.probe_error("ERROR: [youtube] ID: Sign in to confirm you are not a bot.")
@@ -323,6 +343,18 @@ class TestCli(unittest.TestCase):
         lines = result.stdout.strip().split("\n")
         self.assertIn("--dump-single-json", lines)
         self.assertEqual(lines[-1], URL)
+
+    def test_cookies_file_reaches_the_command(self):
+        result = self.run_cli(URL, "--cookies", "my_cookies.txt", "--print-command", "-o", "/tmp/x")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.strip().split("\n")
+        self.assertEqual(lines[lines.index("--cookies") + 1], "my_cookies.txt")
+
+    def test_cookies_file_reaches_the_probe_command(self):
+        result = self.run_cli(URL, "--cookies", "my_cookies.txt", "--print-probe-command")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.strip().split("\n")
+        self.assertEqual(lines[lines.index("--cookies") + 1], "my_cookies.txt")
 
     def test_url_flag_is_equivalent_to_positional(self):
         a = self.run_cli(URL, "--print-command", "-o", "/tmp/x").stdout
@@ -641,6 +673,13 @@ class TestWindowsParity(unittest.TestCase):
         for token in ("chrome", "edge", "msedge"):
             self.assertIn(token, self.source,
                           "the PowerShell GUI does not handle " + token)
+
+    def test_cookies_file_is_wired_the_same_way(self):
+        # The file source (yt-dlp #10927 workaround) has to exist in the
+        # PowerShell builders too, or -PrintCommand parity would diverge.
+        for token in ("--cookies", "CookiesFile", "OpenFileDialog", "10927"):
+            self.assertIn(token, self.source,
+                          "the PowerShell GUI is missing the cookies file path: " + token)
 
     def test_browser_is_asked_about_politely_before_being_forced(self):
         # CloseMainWindow before taskkill /F: the reverse loses unsaved tabs

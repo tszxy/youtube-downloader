@@ -24,7 +24,7 @@ APP = ROOT / "standalone" / "youtube_downloader.py"
 
 try:
     import tkinter
-    from tkinter import messagebox
+    from tkinter import filedialog, messagebox
     _probe = tkinter.Tk()
     _probe.withdraw()
     _probe.update()
@@ -69,9 +69,14 @@ class TestGuiBuilds(unittest.TestCase):
         self.asked = []
         self.answers = []
         self.quit_calls = []
+        self.cookies_path = ""
         self._mainloop = tkinter.Tk.mainloop
         self._showwarning = messagebox.showwarning
         self._askyesno = messagebox.askyesno
+        self._askopenfilename = filedialog.askopenfilename
+        # The cookies-file picker must never open a real file dialog; it returns
+        # whatever a test set, or "" (a cancelled pick) by default.
+        filedialog.askopenfilename = lambda *a, **k: self.cookies_path
         messagebox.showwarning = lambda *a, **k: self.warnings.append(a)
         # Unstubbed, the startup Chrome question opens a real modal dialog and
         # the suite hangs waiting for a human -- but only on a machine slow
@@ -95,6 +100,7 @@ class TestGuiBuilds(unittest.TestCase):
         tkinter.Tk.mainloop = self._mainloop
         messagebox.showwarning = self._showwarning
         messagebox.askyesno = self._askyesno
+        filedialog.askopenfilename = self._askopenfilename
 
     def pump(self, action=None, cycles=10):
         def fake_mainloop(root):
@@ -318,10 +324,83 @@ class TestGuiBuilds(unittest.TestCase):
         self.assertTrue(captured.get("finished"), "run_download was never reached")
         self.assertEqual(captured["url"], "https://youtu.be/ID")
         self.assertEqual(captured["kwargs"]["output_dir"], out_dir)
-        for key in ("mode", "quality", "playlist", "cookies_browser"):
+        for key in ("mode", "quality", "playlist", "cookies_browser", "cookies_file"):
             self.assertIn(key, captured["kwargs"], "widget value never made it through")
         self.assertEqual(captured["kwargs"]["mode"], "video")
         self.assertEqual(captured["kwargs"]["quality"], "best")
+
+    def download_with(self, action_before_start):
+        """Fill a URL and folder, run action_before_start, then 开始下载.
+
+        Returns the kwargs run_download was called with. No real subprocess:
+        run_download is replaced by a capturing stub, same as the delegation
+        test above.
+        """
+        done = threading.Event()
+        captured = {}
+
+        def fake_run_download(url, **kwargs):
+            captured.update(kwargs)
+            done.set()
+            return 0
+
+        self.yd.run_download = fake_run_download
+        out_dir = tempfile.mkdtemp()
+
+        def entries_of(widget, out):
+            if widget.winfo_class() in ("TEntry", "Entry"):
+                out.append(widget)
+            for child in widget.winfo_children():
+                entries_of(child, out)
+            return out
+
+        def action(root):
+            entries = entries_of(root, [])
+            if len(entries) < 2:
+                return
+            entries[0].insert(0, "https://youtu.be/ID")
+            entries[1].delete(0, "end")
+            entries[1].insert(0, out_dir)
+            action_before_start(root)
+            self.click(root, "开始下载")
+            captured["finished"] = done.wait(10)
+
+        self.pump(action=action)
+        self.assertTrue(captured.get("finished"), "run_download was never reached")
+        return captured
+
+    def test_a_chosen_cookies_file_reaches_the_download(self):
+        # The whole point of the file source: what the picker returns is what
+        # yt-dlp is told to read, with no browser cookies alongside it.
+        self.cookies_path = "/tmp/exported_cookies.txt"
+        captured = self.download_with(lambda root: self.click(root, "或用 cookies 文件…"))
+        self.assertEqual(captured["cookies_file"], "/tmp/exported_cookies.txt")
+        self.assertEqual(captured["cookies_browser"], "",
+                         "a browser source was sent alongside the file")
+
+    def test_picking_a_browser_clears_a_chosen_cookies_file(self):
+        # Mutually exclusive: choosing Chrome after a file must drop the file,
+        # or build_command would refuse the two-source command.
+        self.cookies_path = "/tmp/exported_cookies.txt"
+
+        def before(root):
+            self.click(root, "或用 cookies 文件…")  # pick the file first
+            self.click(root, "Chrome")               # then switch to a browser
+
+        captured = self.download_with(before)
+        self.assertEqual(captured["cookies_browser"], "chrome")
+        self.assertEqual(captured["cookies_file"], "",
+                         "the file lingered after a browser was chosen")
+
+    def test_clearing_the_cookies_file_removes_it(self):
+        self.cookies_path = "/tmp/exported_cookies.txt"
+
+        def before(root):
+            self.click(root, "或用 cookies 文件…")
+            self.click(root, "清除")
+
+        captured = self.download_with(before)
+        self.assertEqual(captured["cookies_file"], "")
 
     def run_ticked(self, extra_labels, exit_codes, timeout=10):
         """Tick more download types, press 开始下载, and report the modes run.

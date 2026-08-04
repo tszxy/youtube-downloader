@@ -118,6 +118,7 @@ python3 standalone/youtube_downloader.py URL [选项]
   -o, --output-dir DIR               保存目录（默认当前目录）
       --playlist                     下载整个播放列表
       --cookies-from-browser NAME    使用浏览器登录状态
+      --cookies FILE                 使用导出的 cookies 文件（与上一项二选一）
       --install                      下载便携版 yt-dlp 到 tools/
       --print-command                只打印将要执行的参数，不下载
       --print-probe-command          只打印图形界面用来检测可用选项的参数，不下载
@@ -156,11 +157,21 @@ Use --cookies-from-browser or --cookies for the authentication.
 下载失败，退出代码：1
 ```
 
-**这不是程序出错**，是 YouTube 认为请求来自机器人，要求你证明是登录用户。家庭宽带、
-公司网络、云主机、VPN 出口都可能触发，同一个链接在另一台机器上往往就没事。
-下载因此失败时，工具会在日志最后一行直接把解决办法打出来。
+**这不是程序出错**，是 YouTube 认为请求来自机器人，要求你证明是登录用户。
 
-办法是借用浏览器里已登录的身份：
+### 最省事的办法：换个网络（先试这个）
+
+机器人校验**主要认 IP**。家庭宽带、公司网络、云主机、VPN 出口用久了都可能被标记，
+同一个链接换台机器、换个出口往往就没事。所以第一反应应该是：
+
+> **用手机蜂窝数据开热点**，电脑连上去再下一次 —— 不用登录、不用改任何设置。
+> 换成一个干净 IP，机器人校验常常直接消失。60 秒，免费。
+
+注意必须是**手机流量**：同一条宽带换个 wifi 名字没用，公网 IP 还是那个。
+
+### 换网络也不行：借用登录身份
+
+这时才需要把浏览器里已登录的身份交给 yt-dlp：
 
 - **图形界面**：在「登录状态来源」里选 Chrome（默认是「不使用」），再点开始下载
 - **命令行**：加 `--cookies-from-browser chrome`
@@ -170,6 +181,23 @@ python3 standalone/youtube_downloader.py "URL" --cookies-from-browser chrome
 ```
 
 可选值：`chrome` / `edge` / `firefox` / `brave` / `safari` / `chromium` / `opera` / `vivaldi`。
+
+### Windows 上浏览器 cookies 读不到：用导出的 cookies 文件
+
+新版 Chrome/Edge 在 Windows 上启用了 App-Bound Encryption，外部程序无法解密它们的
+cookies，会报 `Failed to decrypt with DPAPI`（[yt-dlp #10927](https://github.com/yt-dlp/yt-dlp/issues/10927)）。
+这不是本工具能修的，是 Chrome 为防信息窃取有意为之。绕过办法是导出一个 cookies 文件：
+
+1. 在 Chrome 里装一个 cookies.txt 导出扩展（Netscape 格式），在 youtube.com 页面导出
+2. **图形界面**：「登录状态来源」里点「或用 cookies 文件…」，选中那个文件
+3. **命令行**：`--cookies cookies.txt`
+
+```bash
+python3 standalone/youtube_downloader.py "URL" --cookies cookies.txt
+```
+
+导出是一次性的，cookies 文件通常能用好几周。它等同于你的账号凭证，别发给任何人，
+用完可以删掉。浏览器 cookies 和 cookies 文件二选一，不要同时用。
 
 ### 前提一：那个浏览器里确实登录了 YouTube
 

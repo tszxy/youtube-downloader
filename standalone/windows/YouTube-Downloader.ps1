@@ -9,6 +9,7 @@ param(
     [string]$OutputDir = ".",
     [switch]$Playlist,
     [string]$CookiesFromBrowser = "",
+    [string]$Cookies = "",
     [switch]$PrintCommand,
     # The same for the probe that asks a video which options it can deliver.
     [switch]$PrintProbeCommand,
@@ -48,6 +49,10 @@ $script:queueQuality = "best"
 $script:queueOutputDir = ""
 $script:queuePlaylist = $false
 $script:queueBrowser = ""
+$script:queueCookiesFile = ""
+# The exported cookies file, if the user chose one instead of a browser. The
+# way around Windows' App-Bound Encryption (yt-dlp #10927).
+$script:cookiesFile = ""
 $script:queueFfmpegDir = ""
 $script:queueTool = ""
 # Every running child, each with its own stdout/stderr taps and callbacks; see
@@ -211,8 +216,13 @@ function Build-YtDlpArgumentList {
         [string]$OutputDir = ".",
         [bool]$Playlist = $false,
         [string]$CookiesBrowser = "",
+        [string]$CookiesFile = "",
         [string]$FfmpegDir = ""
     )
+
+    if ($CookiesBrowser -and $CookiesFile) {
+        throw "不能同时使用浏览器 cookies 和 cookies 文件，二选一"
+    }
 
     $arguments = @(
         "--no-overwrites",
@@ -223,6 +233,7 @@ function Build-YtDlpArgumentList {
         "--output", (Join-Path $OutputDir "%(title)s [%(id)s].%(ext)s"))
     if (-not $Playlist) { $arguments += "--no-playlist" }
     if ($CookiesBrowser) { $arguments += @("--cookies-from-browser", $CookiesBrowser) }
+    if ($CookiesFile) { $arguments += @("--cookies", $CookiesFile) }
     if ($FfmpegDir) { $arguments += @("--ffmpeg-location", $FfmpegDir) }
 
     switch ($Mode) {
@@ -242,10 +253,12 @@ function Build-ProbeArgumentList {
     # what a video offers so the window can grey out what it cannot deliver.
     param(
         [string]$Url,
-        [string]$CookiesBrowser = ""
+        [string]$CookiesBrowser = "",
+        [string]$CookiesFile = ""
     )
     $arguments = @("--dump-single-json", "--no-warnings", "--skip-download", "--no-playlist")
     if ($CookiesBrowser) { $arguments += @("--cookies-from-browser", $CookiesBrowser) }
+    if ($CookiesFile) { $arguments += @("--cookies", $CookiesFile) }
     $arguments += $Url
     return $arguments
 }
@@ -321,7 +334,7 @@ function Format-OptionSummary($Available) {
 
 if ($PrintProbeCommand) {
     if (-not $Url) { Write-Error "-PrintProbeCommand 需要 -Url"; exit 2 }
-    (Build-ProbeArgumentList -Url $Url -CookiesBrowser $CookiesFromBrowser) -join "`n"
+    (Build-ProbeArgumentList -Url $Url -CookiesBrowser $CookiesFromBrowser -CookiesFile $Cookies) -join "`n"
     exit 0
 }
 
@@ -329,7 +342,7 @@ if ($PrintCommand) {
     if (-not $Url) { Write-Error "-PrintCommand 需要 -Url"; exit 2 }
     $ffmpeg = Resolve-FfmpegDirectory
     $built = Build-YtDlpArgumentList -Url $Url -Mode $Mode -Quality $Quality -OutputDir $OutputDir `
-        -Playlist $Playlist.IsPresent -CookiesBrowser $CookiesFromBrowser `
+        -Playlist $Playlist.IsPresent -CookiesBrowser $CookiesFromBrowser -CookiesFile $Cookies `
         -FfmpegDir $(if ($ffmpeg) { $ffmpeg } else { "" })
     $built -join "`n"
     exit 0
@@ -674,7 +687,8 @@ function Start-VideoProbe {
         return
     }
     $browser = Get-SelectedBrowser
-    $key = "$url|$browser"
+    $cookiesFile = $script:cookiesFile
+    $key = "$url|$browser|$cookiesFile"
     if ($key -eq $script:probedKey) { return }
 
     $ytDlp = Find-Executable "yt-dlp" (Join-Path $toolsDir "yt-dlp.exe")
@@ -690,7 +704,7 @@ function Start-VideoProbe {
     $script:probeLastError = ""
     $probeLabel.Text = "正在检测这个视频能提供哪些选项..."
     $script:probeJob = Start-ChildProcess -FileName $ytDlp `
-        -ArgumentList (Build-ProbeArgumentList -Url $url -CookiesBrowser $browser) `
+        -ArgumentList (Build-ProbeArgumentList -Url $url -CookiesBrowser $browser -CookiesFile $cookiesFile) `
         -OnOutput { param($line) [void]$script:probeOutput.Append($line) } `
         -OnError { param($line) Receive-ProbeError $line } `
         -OnExit { param($exitCode) Complete-VideoProbe $exitCode }
@@ -755,6 +769,7 @@ function Start-QueuedDownload {
         -OutputDir $script:queueOutputDir `
         -Playlist $script:queuePlaylist `
         -CookiesBrowser $script:queueBrowser `
+        -CookiesFile $script:queueCookiesFile `
         -FfmpegDir $script:queueFfmpegDir
     Start-ToolProcess $script:queueTool $arguments $status {
         param($exitCode)
@@ -864,7 +879,10 @@ foreach ($qualitySpec in @(
 $browserGroup = New-Object System.Windows.Forms.GroupBox
 $browserGroup.Text = "登录状态来源（单选）"
 $browserGroup.Location = New-Object System.Drawing.Point(394, 90)
-$browserGroup.Size = New-Object System.Drawing.Size(210, 140)
+# 148 tall, not 140: the radios end at y~106 and the cookies-file row sits
+# below them at y=106..130, which the shorter box would clip. Still clears the
+# probe label at y=240 (this box ends at 90+148=238).
+$browserGroup.Size = New-Object System.Drawing.Size(210, 148)
 $form.Controls.Add($browserGroup)
 
 $script:browserRadios = [ordered]@{}
@@ -886,6 +904,12 @@ foreach ($browserSpec in @(
     # turns out not to be installed.
     $radio.Add_CheckedChanged({
         if ($this.Checked -and -not $script:updatingOptions) {
+            # Picking a browser drops any chosen file, so only one cookie source
+            # is ever handed to yt-dlp. "不使用" (empty tag) leaves the file be.
+            if ([string]$this.Tag -and $script:cookiesFile) {
+                $script:cookiesFile = ""
+                $script:cookiesFileButton.Text = "或用 cookies 文件…"
+            }
             Request-VideoProbe
             # Picking Chrome or Edge is the moment quitting it starts to matter,
             # since it locks its own cookie database while running.
@@ -896,6 +920,44 @@ foreach ($browserSpec in @(
     $script:browserRadios[$browserSpec.Value] = $radio
     $browserIndex++
 }
+
+# A file is the way around Windows' App-Bound Encryption (yt-dlp #10927), where
+# the browser cookies above cannot be decrypted. Mutually exclusive with the
+# radios: yt-dlp takes one cookie source. The pick button doubles as the label,
+# showing the chosen file name so no extra control is needed in the small box.
+$script:cookiesFileButton = New-Object System.Windows.Forms.Button
+$script:cookiesFileButton.Text = "或用 cookies 文件…"
+$script:cookiesFileButton.Location = New-Object System.Drawing.Point(14, 106)
+$script:cookiesFileButton.Size = New-Object System.Drawing.Size(150, 24)
+$script:cookiesFileButton.Add_Click({
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = "选择 cookies 文件（Netscape 格式）"
+    $dialog.Filter = "cookies 文件 (*.txt)|*.txt|所有文件 (*.*)|*.*"
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $script:cookiesFile = $dialog.FileName
+        $script:cookiesFileButton.Text = "已选：" + [System.IO.Path]::GetFileName($dialog.FileName)
+        # Exclusive with a browser source: fall back to 不使用 without firing a
+        # probe of its own (updatingOptions), then probe once with the file.
+        $script:updatingOptions = $true
+        $script:browserRadios[""].Checked = $true
+        $script:updatingOptions = $false
+        Request-VideoProbe
+    }
+})
+$browserGroup.Controls.Add($script:cookiesFileButton)
+
+$cookiesClearButton = New-Object System.Windows.Forms.Button
+$cookiesClearButton.Text = "×"
+$cookiesClearButton.Location = New-Object System.Drawing.Point(168, 106)
+$cookiesClearButton.Size = New-Object System.Drawing.Size(28, 24)
+$cookiesClearButton.Add_Click({
+    if ($script:cookiesFile) {
+        $script:cookiesFile = ""
+        $script:cookiesFileButton.Text = "或用 cookies 文件…"
+        Request-VideoProbe
+    }
+})
+$browserGroup.Controls.Add($cookiesClearButton)
 
 $extraGroup = New-Object System.Windows.Forms.GroupBox
 $extraGroup.Text = "其他"
@@ -1123,6 +1185,7 @@ $downloadButton.Add_Click({
     $script:queueOutputDir = $folderBox.Text
     $script:queuePlaylist = $playlistCheck.Checked
     $script:queueBrowser = Get-SelectedBrowser
+    $script:queueCookiesFile = $script:cookiesFile
     $script:queueFfmpegDir = $(if ($ffmpegDir) { $ffmpegDir } else { "" })
     $script:queueTool = $ytDlp
     Add-Log "开始下载：$url"
@@ -1314,6 +1377,22 @@ if ($SmokeTest) {
     if ($probeArguments[0] -ne "--dump-single-json" -or $probeArguments[-1] -ne "https://youtu.be/ID") {
         $failures += "the probe command is not shaped like yt-dlp expects"
     }
+
+    # The cookies-file source (yt-dlp #10927 workaround) reaches both builders,
+    # and refuses to pair with a browser source.
+    $fileArgs = Build-YtDlpArgumentList -Url "https://youtu.be/ID" -CookiesFile "C:\ck.txt"
+    if (($fileArgs -join " ") -notmatch "--cookies C:\\ck\.txt") {
+        $failures += "the cookies file never reached the download command"
+    }
+    $fileProbe = Build-ProbeArgumentList -Url "https://youtu.be/ID" -CookiesFile "C:\ck.txt"
+    if (($fileProbe -join " ") -notmatch "--cookies C:\\ck\.txt") {
+        $failures += "the cookies file never reached the probe command"
+    }
+    try {
+        Build-YtDlpArgumentList -Url "https://youtu.be/ID" -CookiesBrowser "chrome" -CookiesFile "C:\ck.txt" | Out-Null
+        $failures += "a browser source and a cookies file were allowed together"
+    } catch { }
+    if (-not $script:cookiesFileButton) { $failures += "the cookies file picker was never built" }
 
     if ($failures.Count -gt 0) {
         $failures | ForEach-Object { Write-Host "smoke test FAILED: $_" -ForegroundColor Red }
