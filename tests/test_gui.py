@@ -86,6 +86,13 @@ class TestGuiBuilds(unittest.TestCase):
         # No test may consult, let alone close, a real browser.
         self.yd.browser_running = lambda browser: False
         self.yd.quit_browser = lambda browser, *a, **k: (self.quit_calls.append(browser), True)[1]
+        # Which browsers are installed decides which radios are enabled, and
+        # nothing here is about that. Left real, the browser tests pass on a
+        # developer's machine and fail on a runner with no browser installed:
+        # the radio is greyed out, and a greyed-out radio eats the click.
+        # test_a_browser_that_is_not_installed_is_greyed_out covers the
+        # real function on purpose.
+        self.yd.browser_available = lambda name: True
         # Present by default, so the startup dependency offer stays out of the
         # way. Left real, a machine without ffmpeg would eat the answer queued
         # for the Chrome question and fail unrelated tests.
@@ -156,17 +163,40 @@ class TestGuiBuilds(unittest.TestCase):
             return None
         return visit(root)
 
-    @staticmethod
-    def click(root, label):
+    def click(self, root, label):
+        """Press the control carrying this label, or fail saying why not.
+
+        invoke() on a disabled ttk widget returns without running the command
+        and without complaining, so a test that clicks a greyed-out control
+        asserts nothing at all. That is not hypothetical: four browser tests
+        passed here and failed on a runner with no browser installed, where
+        the radios are greyed out for real.
+        """
+        found = []
+
         def visit(widget):
             try:
-                if widget.cget("text") == label:
-                    widget.invoke()
+                # Labels and group frames carry text too; only a widget that
+                # can be pressed is a candidate, and the walk continues past
+                # the rest.
+                if widget.cget("text") == label and hasattr(widget, "invoke"):
+                    found.append(widget)
                     return True
-            except Exception:  # noqa: BLE001 - not a button
+            except Exception:  # noqa: BLE001 - widget has no text
                 pass
             return any(visit(child) for child in widget.winfo_children())
-        return visit(root)
+
+        visit(root)
+        if not found:
+            self.fail("no control labelled {!r} to click".format(label))
+        widget = found[0]
+        try:
+            state = str(widget.cget("state"))
+        except Exception:  # noqa: BLE001 - no state option means always enabled
+            state = "normal"
+        if state == "disabled":
+            self.fail("{!r} is greyed out, so clicking it would do nothing".format(label))
+        widget.invoke()
 
     def test_window_builds_with_every_control(self):
         self.pump()
@@ -465,11 +495,12 @@ class TestGuiBuilds(unittest.TestCase):
         self.assertEqual(modes, [])
         self.assertTrue(self.warnings, "no warning was shown for an empty selection")
 
-    # --- the startup offer to close Chrome --------------------------------
+    # --- the offer to close the chosen login-source browser ----------------
     #
-    # The question is posted on a 300ms timer so the window is drawn first,
-    # so these pump past it rather than the few milliseconds the other tests
-    # need.
+    # The question follows the radio, not startup: it is asked inline from the
+    # selection handler. What runs late is the quitting itself, on a worker
+    # thread so the window that asked stays responsive, which is what settle()
+    # waits for.
 
     def settle(self, predicate, timeout=2.0):
         """Wait for the quit worker, which runs off the Tk thread."""
@@ -527,6 +558,16 @@ class TestGuiBuilds(unittest.TestCase):
         self.select("Firefox")
         self.assertFalse(self.asked, "offered to close Firefox, which never locks")
         self.assertFalse(self.quit_calls)
+
+    def test_a_browser_that_is_not_installed_is_greyed_out(self):
+        # The one test that is about browser_available itself, so the setUp
+        # stub is replaced rather than left alone: a login source with no
+        # profile on disk has no cookies to give and must not be offerable.
+        self.yd.browser_available = lambda name: name != "chrome"
+        self.pump()
+        states = self.states()
+        self.assertEqual(states["Chrome"], "disabled", "an uninstalled Chrome was offered")
+        self.assertEqual(states["Firefox"], "normal", "an installed browser was greyed out")
 
     # --- the startup dependency check -------------------------------------
 

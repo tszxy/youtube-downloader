@@ -154,7 +154,12 @@ function Stop-Browser([string]$browser) {
     $running = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
     if ($running.Count -eq 0) { return $true }
     foreach ($process in $running) {
-        try { [void]$process.CloseMainWindow() } catch { }
+        # A process can exit between the enumeration above and this call, which
+        # throws on a handle that no longer refers to anything. That is the
+        # outcome being asked for, so it is noted rather than treated as an
+        # error -- and noted rather than swallowed, which PSScriptAnalyzer
+        # rejects as an empty catch block.
+        try { [void]$process.CloseMainWindow() } catch { Write-Verbose "$procName already exited" }
     }
 
     $deadline = (Get-Date).AddSeconds(8)
@@ -1388,10 +1393,17 @@ if ($SmokeTest) {
     if (($fileProbe -join " ") -notmatch "--cookies C:\\ck\.txt") {
         $failures += "the cookies file never reached the probe command"
     }
+    # The rejection is the assertion, so it is recorded in the catch rather
+    # than inferred from not reaching the line after the call: a throw is what
+    # passing looks like here, and an empty catch would neither say that nor
+    # satisfy PSScriptAnalyzer.
+    $rejectedBoth = $false
     try {
         Build-YtDlpArgumentList -Url "https://youtu.be/ID" -CookiesBrowser "chrome" -CookiesFile "C:\ck.txt" | Out-Null
-        $failures += "a browser source and a cookies file were allowed together"
-    } catch { }
+    } catch {
+        $rejectedBoth = $true
+    }
+    if (-not $rejectedBoth) { $failures += "a browser source and a cookies file were allowed together" }
     if (-not $script:cookiesFileButton) { $failures += "the cookies file picker was never built" }
 
     if ($failures.Count -gt 0) {

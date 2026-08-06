@@ -603,12 +603,15 @@ class TestBrowserQuitPrompt(unittest.TestCase):
         yd.browser_running = lambda browser: False
         started = time.monotonic()
         self.assertTrue(yd.quit_browser("edge", grace=5))
-        # One polite request, then out -- no waiting on the grace period and
-        # no escalation to a forced kill.
+        # One polite round, then out -- no waiting on the grace period and no
+        # escalation to a forced kill. The round is one request per candidate
+        # process name, which is one on macOS and Windows but three on Linux,
+        # where the same browser ships under several binary names.
         self.assertLess(time.monotonic() - started, 2)
-        self.assertEqual(len(issued), 1)
-        self.assertNotIn("/F", issued[0])
-        self.assertNotIn("-9", issued[0])
+        self.assertEqual(len(issued), len(yd.browser_process_names("edge")))
+        for cmd in issued:
+            self.assertNotIn("/F", cmd)
+            self.assertNotIn("-9", cmd)
 
     def test_quit_escalates_only_after_the_grace_period(self):
         yd.quit_browser = self.originals["quit_browser"]
@@ -616,8 +619,9 @@ class TestBrowserQuitPrompt(unittest.TestCase):
         yd._run_quiet = lambda cmd, timeout=15: issued.append(cmd)
         yd.browser_running = lambda browser: True  # never goes away
         self.assertFalse(yd.quit_browser("chrome", grace=0.5))
-        self.assertGreater(len(issued), 1, "a stubborn browser was never escalated")
-        forced = " ".join(" ".join(cmd) for cmd in issued[1:])
+        polite = len(yd.browser_process_names("chrome"))
+        self.assertGreater(len(issued), polite, "a stubborn browser was never escalated")
+        forced = " ".join(" ".join(cmd) for cmd in issued[polite:])
         self.assertTrue("/F" in forced or "-9" in forced)
 
 
