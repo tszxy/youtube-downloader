@@ -12,7 +12,9 @@ Two things make it work outside a real desktop session:
 Skipped automatically when there is no display or no tkinter.
 """
 
+import faulthandler
 import importlib.util
+import os
 import tempfile
 import threading
 import time
@@ -32,6 +34,16 @@ try:
     DISPLAY = True
 except Exception:  # noqa: BLE001 - any failure means we cannot open a window
     DISPLAY = False
+
+
+# A blocked Tk call does not return to Python, so no timeout written in Python
+# can end it: unittest cannot fail the test, KeyboardInterrupt cannot reach it,
+# and the run sits there until the CI job's own limit kills the whole machine
+# 15 minutes later with no output at all. faulthandler runs on its own thread
+# and writes straight to the stderr file descriptor, so it is the one thing
+# that still works -- it names the hung test and every thread's stack.
+# Generous on purpose: the slowest test here waits up to 10s for a download.
+HANG_TIMEOUT = float(os.environ.get("GUI_TEST_HANG_TIMEOUT", "60"))
 
 
 def load_app():
@@ -62,6 +74,7 @@ def snapshot(widget, out):
 @unittest.skipUnless(DISPLAY, "no display or tkinter available")
 class TestGuiBuilds(unittest.TestCase):
     def setUp(self):
+        faulthandler.dump_traceback_later(HANG_TIMEOUT, exit=True)
         self.yd = load_app()
         self.widgets = []
         self.window_title = ""
@@ -104,6 +117,7 @@ class TestGuiBuilds(unittest.TestCase):
         return self.answers.pop(0) if self.answers else False
 
     def tearDown(self):
+        faulthandler.cancel_dump_traceback_later()
         tkinter.Tk.mainloop = self._mainloop
         messagebox.showwarning = self._showwarning
         messagebox.askyesno = self._askyesno
