@@ -123,7 +123,15 @@ class TestGuiBuilds(unittest.TestCase):
         messagebox.askyesno = self._askyesno
         filedialog.askopenfilename = self._askopenfilename
 
-    def pump(self, action=None, cycles=10):
+    def pump(self, action=None, cycles=10, settle_cycles=None):
+        """Build the window, run `action` against it, and snapshot it.
+
+        settle_cycles is how hard to pump *after* the action, and exists
+        because update() is not always safe to call: see select().
+        """
+        if settle_cycles is None:
+            settle_cycles = cycles
+
         def fake_mainloop(root):
             try:
                 root.withdraw()
@@ -131,7 +139,7 @@ class TestGuiBuilds(unittest.TestCase):
                     root.update()
                 if action is not None:
                     action(root)
-                    for _ in range(cycles):
+                    for _ in range(settle_cycles):
                         root.update()
                 # Read off the live window, like every other snapshot here:
                 # asserting on the constant would not catch it never reaching
@@ -526,11 +534,24 @@ class TestGuiBuilds(unittest.TestCase):
         return False
 
     def select(self, label):
-        """Click a login-source radio by its label and let the offer settle."""
-        def action(root):
-            self.click(root, label)
-            time.sleep(0.3)
-        self.pump(action=action)
+        """Click a login-source radio by its label. Nothing is pumped after.
+
+        The click carries the whole question: offer_browser_quit runs inline
+        from the radio's command, so by the time click() returns the dialog
+        has been answered and only the quitting is still outstanding -- and
+        that runs on a worker thread, which settle() waits for without Tk.
+
+        Pumping anyway is not merely unnecessary, it hangs. On the macOS CI
+        runner update() never returns once this dialog has been answered, and
+        a blocked Tk call cannot be interrupted from Python, so the job sat
+        there until it was killed 15 minutes later. It does not reproduce on
+        a desktop macOS session under Tk 8.5 or 9.0, so the cause is
+        something about that runner rather than anything the window does.
+        Nothing here needs those events delivered, so they are not asked for.
+        The app itself is unaffected: it runs a real mainloop and never calls
+        update().
+        """
+        self.pump(action=lambda root: self.click(root, label), settle_cycles=0)
 
     def test_selecting_chrome_offers_to_close_it(self):
         self.yd.browser_running = lambda browser: browser == "chrome"
