@@ -44,8 +44,13 @@ python3 standalone/youtube_downloader.py "https://youtu.be/VIDEO_ID" -o ~/Downlo
 **A. 不需要装任何东西**（PowerShell 图形版）
 
 1. 打开 `standalone\windows\`
-2. 第一次双击 `Install-and-Run.bat` —— 自动下载 yt-dlp 和 FFmpeg 到 `tools\`，校验 SHA-256 后打开界面
-3. 以后双击 `Run-Downloader.bat`
+2. 双击 `YouTube-Downloader.bat` —— **每次都是它，没有第二个要选**
+
+界面打开后会自检 yt-dlp 和 FFmpeg：缺哪个就问你要不要现在装（下载到 `tools\`，
+校验 SHA-256），都齐了就直接进主界面，不打扰。所以第一次和以后没有区别。
+
+> `Install-and-Run.bat` 和 `Run-Downloader.bat` 仍然保留，只是转发到上面那个，
+> 免得旧的快捷方式失效。新用户认准 `YouTube-Downloader.bat` 就行。
 
 安装时每个下载都应该打印 `checksum ok`。如果看到黄色的
 `no published checksum for ..., skipping verification`，说明校验没做成，
@@ -113,6 +118,7 @@ python3 standalone/youtube_downloader.py URL [选项]
   -o, --output-dir DIR               保存目录（默认当前目录）
       --playlist                     下载整个播放列表
       --cookies-from-browser NAME    使用浏览器登录状态
+      --cookies FILE                 使用导出的 cookies 文件（与上一项二选一）
       --install                      下载便携版 yt-dlp 到 tools/
       --print-command                只打印将要执行的参数，不下载
       --print-probe-command          只打印图形界面用来检测可用选项的参数，不下载
@@ -151,11 +157,21 @@ Use --cookies-from-browser or --cookies for the authentication.
 下载失败，退出代码：1
 ```
 
-**这不是程序出错**，是 YouTube 认为请求来自机器人，要求你证明是登录用户。家庭宽带、
-公司网络、云主机、VPN 出口都可能触发，同一个链接在另一台机器上往往就没事。
-下载因此失败时，工具会在日志最后一行直接把解决办法打出来。
+**这不是程序出错**，是 YouTube 认为请求来自机器人，要求你证明是登录用户。
 
-办法是借用浏览器里已登录的身份：
+### 最省事的办法：换个网络（先试这个）
+
+机器人校验**主要认 IP**。家庭宽带、公司网络、云主机、VPN 出口用久了都可能被标记，
+同一个链接换台机器、换个出口往往就没事。所以第一反应应该是：
+
+> **用手机蜂窝数据开热点**，电脑连上去再下一次 —— 不用登录、不用改任何设置。
+> 换成一个干净 IP，机器人校验常常直接消失。60 秒，免费。
+
+注意必须是**手机流量**：同一条宽带换个 wifi 名字没用，公网 IP 还是那个。
+
+### 换网络也不行：借用登录身份
+
+这时才需要把浏览器里已登录的身份交给 yt-dlp：
 
 - **图形界面**：在「登录状态来源」里选 Chrome（默认是「不使用」），再点开始下载
 - **命令行**：加 `--cookies-from-browser chrome`
@@ -166,6 +182,23 @@ python3 standalone/youtube_downloader.py "URL" --cookies-from-browser chrome
 
 可选值：`chrome` / `edge` / `firefox` / `brave` / `safari` / `chromium` / `opera` / `vivaldi`。
 
+### Windows 上浏览器 cookies 读不到：用导出的 cookies 文件
+
+新版 Chrome/Edge 在 Windows 上启用了 App-Bound Encryption，外部程序无法解密它们的
+cookies，会报 `Failed to decrypt with DPAPI`（[yt-dlp #10927](https://github.com/yt-dlp/yt-dlp/issues/10927)）。
+这不是本工具能修的，是 Chrome 为防信息窃取有意为之。绕过办法是导出一个 cookies 文件：
+
+1. 在 Chrome 里装一个 cookies.txt 导出扩展（Netscape 格式），在 youtube.com 页面导出
+2. **图形界面**：「登录状态来源」里点「或用 cookies 文件…」，选中那个文件
+3. **命令行**：`--cookies cookies.txt`
+
+```bash
+python3 standalone/youtube_downloader.py "URL" --cookies cookies.txt
+```
+
+导出是一次性的，cookies 文件通常能用好几周。它等同于你的账号凭证，别发给任何人，
+用完可以删掉。浏览器 cookies 和 cookies 文件二选一，不要同时用。
+
 ### 前提一：那个浏览器里确实登录了 YouTube
 
 打开 youtube.com 看右上角是不是你的头像。没登录的话，读到的 cookies 是匿名的，
@@ -175,6 +208,18 @@ python3 standalone/youtube_downloader.py "URL" --cookies-from-browser chrome
 
 Chrome 运行时会独占 cookies 数据库，yt-dlp 读不到。**关掉所有窗口不等于退出**——
 Chrome 默认还会在后台常驻。
+
+> **图形界面会替你处理这一步。** 在「登录状态来源」里选中 Chrome 或 Edge 时，
+> 如果它正在运行，会弹窗问你要不要现在退出它；选「是」就自动退出，选「否」
+> 则什么都不做。命令行只在加了 `--cookies-from-browser chrome`（或 `edge`）
+> 且在终端里交互运行时才会问，管道和定时任务里不会卡住等输入。
+>
+> Chrome 和 Edge 都这样处理 —— 两个都是 Chromium，运行时都会锁住自己的
+> cookies 库。退出是先礼后兵：先正常请求退出（不丢已保存的会话），只有它在
+> 8 秒内没反应——通常是卡在「确定要离开此页面吗」的弹窗上——才强制结束。
+> 无论哪种方式，未保存的网页内容都会丢失。
+
+下面是手动退出的办法，选「否」或想自己动手时用得上。
 
 **Windows：**
 
@@ -196,10 +241,16 @@ taskkill /IM chrome.exe /F
 
 **Linux：** 同样确认没有残留进程，`pkill chrome` 即可。
 
-### 前提三：换个浏览器往往更省事
+### 前提三：Chrome 不行就换 Edge
 
-**Firefox 通常不需要退出**就能读到 cookies，是最省心的选择。
-Windows 上 Edge 和 Chrome 的行为一样，也要彻底退出。
+Chrome 有时读不到（比如 Windows 上新版 Chrome 的
+[App-Bound Encryption](https://github.com/yt-dlp/yt-dlp/issues/10927) 会挡住
+外部程序解密 cookies）。这种时候在「登录状态来源」里改选 **Edge** 再试 ——
+Edge 是 Windows 自带的，不用另装,前提是 Edge 里也登录了 YouTube。图形界面
+对 Edge 和 Chrome 一视同仁：选中时同样会问你要不要退出它。
+
+Edge 同为 Chromium，Windows 上可能有一样的加密限制，不保证一定成 —— 但它是
+零成本的第二选择，值得一试。
 
 ### 还是不行
 

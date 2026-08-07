@@ -23,11 +23,17 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
 
-APP_TITLE = "YouTube 独立下载器"
+# Shown in the title bar so a bug report says which build it came from. The
+# PowerShell GUI carries the same string; tests/test_downloader.py fails if the
+# two ever disagree.
+VERSION = "1.0.0"
+APP_NAME = "YouTube 独立下载器"
+APP_TITLE = "{} v{}".format(APP_NAME, VERSION)
 HERE = Path(__file__).resolve().parent
 TOOLS_DIR = HERE / "tools"
 
@@ -83,6 +89,7 @@ def build_command(
     output_dir=".",
     playlist=False,
     cookies_browser="",
+    cookies_file="",
     ffmpeg_dir=None,
 ):
     """Return the full argv for one yt-dlp invocation.
@@ -96,6 +103,10 @@ def build_command(
         raise ValueError("unsupported mode: {} (use {})".format(mode, ", ".join(MODES)))
     if quality not in QUALITIES:
         raise ValueError("unsupported quality: {} (use {})".format(quality, ", ".join(QUALITIES)))
+    if cookies_browser and cookies_file:
+        # yt-dlp accepts only one cookie source; sending both makes it error out
+        # on a combination the user never intends.
+        raise ValueError("不能同时使用浏览器 cookies 和 cookies 文件，二选一")
 
     template = str(Path(output_dir) / "%(title)s [%(id)s].%(ext)s")
     cmd = list(runner) + [
@@ -114,6 +125,11 @@ def build_command(
         cmd.append("--no-playlist")
     if cookies_browser:
         cmd += ["--cookies-from-browser", cookies_browser]
+    if cookies_file:
+        # The way around Windows' App-Bound Encryption (yt-dlp #10927): an
+        # exported Netscape cookies file is read directly, with no browser
+        # database to decrypt.
+        cmd += ["--cookies", str(cookies_file)]
     if ffmpeg_dir:
         cmd += ["--ffmpeg-location", str(ffmpeg_dir)]
 
@@ -144,7 +160,7 @@ def build_command(
 # that would silently produce nothing.
 # --------------------------------------------------------------------------
 
-def probe_command(runner, url, cookies_browser=""):
+def probe_command(runner, url, cookies_browser="", cookies_file=""):
     """Return the argv that asks yt-dlp to describe a video without downloading."""
     if not YOUTUBE_URL.match(url):
         raise ValueError("只支持 YouTube 链接：{}".format(url))
@@ -154,8 +170,12 @@ def probe_command(runner, url, cookies_browser=""):
         "--skip-download",
         "--no-playlist",
     ]
+    # The probe must carry the same identity as the download, or it reports a
+    # video as blocked that the download would in fact reach.
     if cookies_browser:
         cmd += ["--cookies-from-browser", cookies_browser]
+    if cookies_file:
+        cmd += ["--cookies", str(cookies_file)]
     cmd.append(url)
     return cmd
 
@@ -173,7 +193,7 @@ def probe_error(stderr, returncode=1):
     return "yt-dlp 退出代码 {}".format(returncode)
 
 
-def probe(url, cookies_browser="", timeout=90):
+def probe(url, cookies_browser="", cookies_file="", timeout=90):
     """Return yt-dlp's JSON description of one video. Raises on any failure."""
     runner = find_runner()
     if runner is None:
@@ -183,7 +203,7 @@ def probe(url, cookies_browser="", timeout=90):
         # Without this a console window flashes on every keystroke-triggered probe.
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     result = subprocess.run(
-        probe_command(runner, url, cookies_browser),
+        probe_command(runner, url, cookies_browser, cookies_file),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
@@ -312,6 +332,122 @@ def browser_available(name):
     if not name:
         return True  # "不使用" is always a valid choice.
     return any(path.is_dir() for path in browser_profile_paths(name))
+
+
+# --------------------------------------------------------------------------
+# Chromium browsers keep their cookie database locked while they run
+# --------------------------------------------------------------------------
+
+# yt-dlp fails with "Could not copy ... cookie database" (yt-dlp #7271) for as
+# long as the browser is alive, and closing every window ends no process on any
+# of the three platforms -- hence a process check, not a window check.
+#
+# Only Chrome and Edge are handled: they are the two Chromium browsers offered
+# as a login source that lock the database, and the pair the user falls back
+# between when one refuses. Firefox does not need quitting, and guessing at the
+# process names of the rest would do more harm than good.
+BROWSER_QUIT_GRACE = 8.0
+
+BROWSER_DISPLAY = {"chrome": "Chrome", "edge": "Edge"}
+
+
+def browser_process_names(browser):
+    if browser == "edge":
+        if sys.platform == "darwin":
+            return ["Microsoft Edge"]
+        if os.name == "nt":
+            return ["msedge.exe"]
+        return ["msedge", "microsoft-edge", "microsoft-edge-stable"]
+    if sys.platform == "darwin":
+        return ["Google Chrome"]
+    if os.name == "nt":
+        return ["chrome.exe"]
+    return ["chrome", "google-chrome", "google-chrome-stable"]
+
+
+def browser_quit_question(browser):
+    name = BROWSER_DISPLAY.get(browser, browser)
+    return (
+        "检测到 {0} 正在运行。\n\n"
+        "{0} 运行时会独占 cookies 数据库，读取登录状态会失败"
+        "（yt-dlp 已知问题 #7271）；关掉所有窗口并不等于退出。\n\n"
+        "现在退出 {0} 吗？未保存的网页内容会丢失，下载结束后可以重新打开。".format(name)
+    )
+
+
+def browser_still_running(browser):
+    name = BROWSER_DISPLAY.get(browser, browser)
+    return "{0} 仍在运行。如果之后提示读取 cookies 失败，请先彻底退出 {0} 再重试。".format(name)
+
+
+def _run_quiet(cmd, timeout=15):
+    """Run a small helper command. None when it could not be run at all."""
+    kwargs = {}
+    if os.name == "nt":
+        # Same reason as probe(): no console window may flash into view.
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, universal_newlines=True,
+            encoding="utf-8", errors="replace", timeout=timeout, **kwargs
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def browser_running(browser):
+    """True only when the given browser's process is definitely alive.
+
+    "Cannot tell" answers False on purpose: offering to kill a browser that is
+    not running is worse than the failure the offer prevents, and yt-dlp names
+    that failure clearly enough on its own.
+    """
+    names = browser_process_names(browser)
+    if os.name == "nt":
+        result = _run_quiet(["tasklist", "/FI", "IMAGENAME eq {}".format(names[0]), "/NH"])
+        if result is None:
+            return False
+        return names[0].lower() in (result.stdout or "").lower()
+    for name in names:
+        result = _run_quiet(["pgrep", "-x", name])
+        if result is not None and result.returncode == 0:
+            return True
+    return False
+
+
+def quit_browser(browser, grace=BROWSER_QUIT_GRACE):
+    """Close the browser, politely first. True when nothing is left running.
+
+    The polite request goes first on every platform: a forced kill loses
+    unsaved tab content and makes the browser offer to restore the session on
+    its next launch. Only a process that ignores it for `grace` seconds --
+    usually one holding a "leave site?" dialog -- is killed outright, which is
+    what the user agreed to when they answered yes.
+    """
+    names = browser_process_names(browser)
+    if sys.platform == "darwin":
+        _run_quiet(["osascript", "-e", 'quit app "{}"'.format(names[0])], timeout=grace)
+    elif os.name == "nt":
+        _run_quiet(["taskkill", "/IM", names[0]], timeout=grace)
+    else:
+        for name in names:
+            _run_quiet(["pkill", "-x", name], timeout=grace)
+
+    deadline = time.monotonic() + grace
+    while True:
+        if not browser_running(browser):
+            return True
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.3)
+
+    if os.name == "nt":
+        _run_quiet(["taskkill", "/IM", names[0], "/T", "/F"])
+    else:
+        for name in names:
+            _run_quiet(["pkill", "-9", "-x", name])
+    time.sleep(1.0)
+    return not browser_running(browser)
 
 
 # --------------------------------------------------------------------------
@@ -536,12 +672,15 @@ def bot_check_hint(cookies_browser=""):
     if cookies_browser:
         return (
             "YouTube 仍然要求验证：请确认 {} 已登录 YouTube（并且已完全退出该浏览器，"
-            "否则读不到 cookies），或换一个浏览器、稍后再试。".format(cookies_browser)
+            "否则读不到 cookies）。Windows 上新版 Chrome/Edge 的 cookies 可能无法解密"
+            "（yt-dlp #10927），这时改用导出的 cookies 文件（命令行 --cookies 文件，"
+            "图形界面「或用 cookies 文件」）。也可以换个网络（手机热点最省事）稍后再试。".format(cookies_browser)
         )
     return (
-        "YouTube 要求验证你不是机器人。用已登录的浏览器身份重试："
-        "命令行加 --cookies-from-browser chrome（edge / firefox / safari 等同理），"
-        "图形界面在「登录状态来源」里选一个。"
+        "YouTube 要求验证你不是机器人。最省事的办法是换个网络重试——机器人校验通常"
+        "认 IP，用手机热点换一个干净 IP 往往直接就过。或者用已登录的身份："
+        "命令行加 --cookies-from-browser chrome（或 --cookies 导出的文件），"
+        "图形界面在「登录状态来源」里选一个或选 cookies 文件。"
     )
 
 
@@ -609,6 +748,7 @@ def build_parser():
             "  %(prog)s https://youtu.be/ID --quality 1080\n"
             "  %(prog)s PLAYLIST_URL --playlist\n"
             "  %(prog)s https://youtu.be/ID --cookies-from-browser chrome\n"
+            "  %(prog)s https://youtu.be/ID --cookies cookies.txt\n"
         ),
     )
     parser.add_argument("url", nargs="?", help="YouTube 链接")
@@ -620,6 +760,9 @@ def build_parser():
     parser.add_argument("--playlist", action="store_true", help="下载整个播放列表")
     parser.add_argument("--cookies-from-browser", default="", choices=("",) + BROWSERS,
                         metavar="BROWSER", help="使用浏览器登录状态：" + " / ".join(BROWSERS))
+    parser.add_argument("--cookies", dest="cookies_file", default="", metavar="FILE",
+                        help="使用导出的 cookies 文件（Netscape 格式）；Windows 上新版 "
+                             "Chrome 读不到浏览器 cookies 时用它")
     parser.add_argument("--install", action="store_true", help="下载便携版 yt-dlp 到 tools/ 后退出")
     parser.add_argument("--gui", action="store_true", help="强制打开图形界面")
     parser.add_argument("--print-command", action="store_true",
@@ -627,6 +770,40 @@ def build_parser():
     parser.add_argument("--print-probe-command", action="store_true",
                         help="只打印检测可用选项用的 yt-dlp 参数，不下载")
     return parser
+
+
+def offer_browser_quit_cli(cookies_browser, ask=None, out=print):
+    """The GUI's question, for a terminal. True when the browser was closed.
+
+    Narrower than the GUI on purpose. Only a run that actually asked for Chrome
+    or Edge cookies is interrupted, and only when someone is there to answer: a
+    piped or cron-driven run must not block forever on input() over a browser
+    it may not even be using.
+    """
+    if cookies_browser not in BROWSER_DISPLAY or not browser_running(cookies_browser):
+        return False
+    name = BROWSER_DISPLAY[cookies_browser]
+    if ask is None:
+        if not (sys.stdin and sys.stdin.isatty()):
+            out(browser_still_running(cookies_browser))
+            return False
+        ask = input
+    out(browser_quit_question(cookies_browser))
+    try:
+        answer = ask("现在退出 {}？[y/N] ".format(name))
+    except (EOFError, KeyboardInterrupt):
+        out("")
+        out(browser_still_running(cookies_browser))
+        return False
+    if (answer or "").strip().lower() not in ("y", "yes", "是"):
+        out(browser_still_running(cookies_browser))
+        return False
+    out("正在退出 {}...".format(name))
+    if quit_browser(cookies_browser):
+        out("{} 已退出。".format(name))
+        return True
+    out("{} 没能退出，请手动退出后重试。".format(name))
+    return False
 
 
 def main(argv=None):
@@ -654,12 +831,14 @@ def main(argv=None):
         output_dir=args.output_dir,
         playlist=args.playlist,
         cookies_browser=args.cookies_from_browser,
+        cookies_file=args.cookies_file,
     )
 
     try:
         if args.print_probe_command:
             runner = find_runner() or ["yt-dlp"]
-            print("\n".join(probe_command(runner, args.url, args.cookies_from_browser)))
+            print("\n".join(probe_command(
+                runner, args.url, args.cookies_from_browser, args.cookies_file)))
             return 0
         if args.print_command:
             runner = find_runner() or ["yt-dlp"]
@@ -668,6 +847,7 @@ def main(argv=None):
             # spaces, and directly comparable with the PowerShell version.
             print("\n".join(build_command(runner, args.url, **options)))
             return 0
+        offer_browser_quit_cli(args.cookies_from_browser)
         return run_download(args.url, on_line=print, **options)
     except (ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
@@ -753,12 +933,41 @@ def run_gui():
     browser_group = ttk.Labelframe(options, text="登录状态来源（单选）", padding=(10, 6))
     browser_group.grid(row=0, column=2, sticky="nsew", padx=(12, 0))
     browser_var = tk.StringVar(value="")
+    cookies_file_var = tk.StringVar(value="")
+    cookies_file_label = tk.StringVar(value="")
     browser_buttons = {}
     for index, (value, label) in enumerate(BROWSER_LABELS):
         button = ttk.Radiobutton(browser_group, text=label, value=value, variable=browser_var,
-                                 command=lambda: schedule_probe())
+                                 command=lambda: on_browser_selected())
         button.grid(row=index % 3, column=index // 3, sticky="w", padx=(0, 12))
         browser_buttons[value] = button
+
+    # A file is the way around Windows' App-Bound Encryption (yt-dlp #10927),
+    # where the browser cookies above cannot be decrypted. Mutually exclusive
+    # with the radios: yt-dlp takes one cookie source, and offering both here
+    # would only build a command it rejects.
+    def choose_cookies_file():
+        chosen = filedialog.askopenfilename(
+            title="选择 cookies 文件（Netscape 格式）",
+            filetypes=[("cookies 文件", "*.txt"), ("所有文件", "*.*")])
+        if not chosen:
+            return
+        cookies_file_var.set(chosen)
+        cookies_file_label.set("已选：{}".format(Path(chosen).name))
+        browser_var.set("")  # exclusive with a browser source
+        schedule_probe()
+
+    def clear_cookies_file():
+        cookies_file_var.set("")
+        cookies_file_label.set("")
+        schedule_probe()
+
+    ttk.Button(browser_group, text="或用 cookies 文件…", command=choose_cookies_file).grid(
+        row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    ttk.Button(browser_group, text="清除", width=5, command=clear_cookies_file).grid(
+        row=3, column=2, sticky="e", pady=(8, 0))
+    ttk.Label(browser_group, textvariable=cookies_file_label, foreground="#0a7").grid(
+        row=4, column=0, columnspan=3, sticky="w")
 
     extra_group = ttk.Labelframe(options, text="其他", padding=(10, 6))
     extra_group.grid(row=0, column=3, sticky="nsew", padx=(12, 0))
@@ -856,16 +1065,18 @@ def run_gui():
             state["probe_timer"] = root.after(1500, probe_now)
             return
         cookies = browser_var.get()
-        if (url, cookies) == state["probed"]:
+        cfile = cookies_file_var.get()
+        if (url, cookies, cfile) == state["probed"]:
             return
-        state["probed"] = (url, cookies)
+        state["probed"] = (url, cookies, cfile)
         state["probe_token"] += 1
         token = state["probe_token"]
         probe_var.set("正在检测这个视频能提供哪些选项...")
 
         def work():
             try:
-                messages.put(("probe", token, available_options(probe(url, cookies_browser=cookies)), ""))
+                messages.put(("probe", token, available_options(
+                    probe(url, cookies_browser=cookies, cookies_file=cfile)), ""))
             except Exception as exc:  # noqa: BLE001 - shown next to the options
                 messages.put(("probe", token, None, str(exc)))
 
@@ -941,6 +1152,7 @@ def run_gui():
             output_dir=folder,
             playlist=playlist_var.get(),
             cookies_browser=browser_var.get(),
+            cookies_file=cookies_file_var.get(),
         )
 
         def task():
@@ -1033,6 +1245,72 @@ def run_gui():
             log.configure(state="disabled")
         state["timer"] = root.after(120, drain)
 
+    def offer_missing_dependencies():
+        """One entry point: whatever is missing is detected and offered here.
+
+        Anything already present is skipped in silence -- a working install
+        must not be nagged on every launch.
+        """
+        missing = []
+        if find_runner() is None:
+            missing.append("yt-dlp")
+        if not ffmpeg_available():
+            missing.append("FFmpeg")
+        if not missing:
+            return
+        joined = "、".join(missing)
+        if messagebox.askyesno(
+                "缺少依赖",
+                "缺少：{}\n\n现在自动下载并安装吗？\n"
+                "（会校验 SHA-256，安装到 tools/ 文件夹，不影响系统其他部分。）".format(joined),
+                parent=root):
+            start_install()
+        else:
+            append("缺少 {}。可以随时点「安装/更新依赖」。".format(joined))
+
+    def on_startup():
+        # Only dependencies at startup. Quitting the login-source browser is
+        # offered when that browser is picked, since none is selected yet here.
+        offer_missing_dependencies()
+
+    def offer_browser_quit(browser):
+        """Ask to close the login-source browser, which locks its own cookies.
+
+        Driven by the login-source selection rather than startup: with two
+        browsers to choose between, the moment you pick one is when quitting it
+        starts to matter, and prompting about the other would be noise. Only
+        Chrome and Edge lock the database, so only those are offered.
+        """
+        if browser not in BROWSER_DISPLAY or not browser_running(browser):
+            return
+        name = BROWSER_DISPLAY[browser]
+        if not messagebox.askyesno(
+                "{} 正在运行".format(name), browser_quit_question(browser), parent=root):
+            append(browser_still_running(browser))
+            return
+        append("正在退出 {}...".format(name))
+
+        def task():
+            # Off the main thread: quit_browser waits seconds for the browser to
+            # go, and waiting inline would freeze the window that asked.
+            if quit_browser(browser):
+                append("{} 已退出，现在可以读取登录状态了。".format(name))
+            else:
+                append("{} 没能退出，请手动退出后重试。".format(name))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def on_browser_selected():
+        # The login-source radios call this: re-probe with the new cookie
+        # source, then offer to quit it if it holds its database open.
+        if browser_var.get():
+            # Picking a browser drops any chosen file, so only one source is
+            # ever handed to yt-dlp.
+            cookies_file_var.set("")
+            cookies_file_label.set("")
+        schedule_probe()
+        offer_browser_quit(browser_var.get())
+
     def on_close():
         # Cancel the pending drain first: letting it fire after the window is
         # gone makes Tcl raise "invalid command name ...drain".
@@ -1053,6 +1331,9 @@ def run_gui():
     url_var.trace_add("write", schedule_probe)
     url_entry.focus_set()
     state["timer"] = root.after(120, drain)
+    # Deferred rather than called here: the window has to be on screen first,
+    # or the dialog appears in front of nothing and cannot be placed properly.
+    root.after(300, on_startup)
     root.mainloop()
     return 0
 

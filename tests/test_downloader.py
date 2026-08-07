@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -126,6 +127,20 @@ class TestCommandBuilding(unittest.TestCase):
 
     def test_no_cookies_flag_when_unset(self):
         self.assertNotIn("--cookies-from-browser", args_for())
+        self.assertNotIn("--cookies", args_for())
+
+    def test_cookies_file_is_passed_through(self):
+        # The Windows escape hatch (yt-dlp #10927): an exported file, read
+        # directly, no browser database to decrypt.
+        args = args_for(cookies_file="/path/to/cookies.txt")
+        self.assertEqual(args[args.index("--cookies") + 1], "/path/to/cookies.txt")
+        self.assertNotIn("--cookies-from-browser", args)
+
+    def test_cookies_file_and_browser_are_mutually_exclusive(self):
+        # yt-dlp takes one cookie source; sending both is a command it rejects,
+        # so the builder refuses to construct it.
+        with self.assertRaises(ValueError):
+            args_for(cookies_browser="chrome", cookies_file="/path/to/cookies.txt")
 
     def test_concurrent_fragments_always_set(self):
         for mode in yd.MODES:
@@ -167,6 +182,12 @@ class TestProbeCommand(unittest.TestCase):
     def test_cookies_browser_is_passed_through(self):
         args = yd.probe_command(RUNNER, URL, "firefox")
         self.assertEqual(args[args.index("--cookies-from-browser") + 1], "firefox")
+
+    def test_cookies_file_is_passed_through(self):
+        # The probe must carry the same identity as the download, or it reports
+        # a video blocked that the download would in fact reach.
+        args = yd.probe_command(RUNNER, URL, cookies_file="/path/cookies.txt")
+        self.assertEqual(args[args.index("--cookies") + 1], "/path/cookies.txt")
 
     def test_bot_check_becomes_actionable_advice(self):
         message = yd.probe_error("ERROR: [youtube] ID: Sign in to confirm you are not a bot.")
@@ -323,6 +344,18 @@ class TestCli(unittest.TestCase):
         self.assertIn("--dump-single-json", lines)
         self.assertEqual(lines[-1], URL)
 
+    def test_cookies_file_reaches_the_command(self):
+        result = self.run_cli(URL, "--cookies", "my_cookies.txt", "--print-command", "-o", "/tmp/x")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.strip().split("\n")
+        self.assertEqual(lines[lines.index("--cookies") + 1], "my_cookies.txt")
+
+    def test_cookies_file_reaches_the_probe_command(self):
+        result = self.run_cli(URL, "--cookies", "my_cookies.txt", "--print-probe-command")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.strip().split("\n")
+        self.assertEqual(lines[lines.index("--cookies") + 1], "my_cookies.txt")
+
     def test_url_flag_is_equivalent_to_positional(self):
         a = self.run_cli(URL, "--print-command", "-o", "/tmp/x").stdout
         b = self.run_cli("--url", URL, "--print-command", "-o", "/tmp/x").stdout
@@ -431,6 +464,248 @@ class TestBotCheck(unittest.TestCase):
             yd.find_runner = original
         self.assertEqual(len(seen), 1, "the cancel button never received the job")
         self.assertIsInstance(seen[0], yd.Download)
+
+
+class TestBrowserQuitPrompt(unittest.TestCase):
+    """The offer to close the login-source browser, which locks its cookies.
+
+    Covers both Chrome and Edge, the two Chromium sources that hold the
+    database open. Every test stubs both the detection and the killing: a test
+    run must never actually close the browser of whoever is running it.
+    """
+
+    def setUp(self):
+        self.calls = []
+        self.originals = {
+            name: getattr(yd, name) for name in ("browser_running", "quit_browser", "_run_quiet")
+        }
+        # Any command reaching _run_quiet is a bug in the test, not a pass.
+        yd._run_quiet = lambda cmd, timeout=15: self.fail(
+            "a real process command escaped the stubs: {}".format(cmd))
+
+    def tearDown(self):
+        for name, value in self.originals.items():
+            setattr(yd, name, value)
+
+    def arrange(self, running, quit_result=True):
+        yd.browser_running = lambda browser: running
+        yd.quit_browser = lambda browser, *a, **kw: self.calls.append(browser) or quit_result
+
+    def offer(self, browser="chrome", answer="y", **kwargs):
+        out = []
+        result = yd.offer_browser_quit_cli(
+            browser, ask=lambda _prompt: answer, out=out.append, **kwargs)
+        return result, "\n".join(out)
+
+    def test_no_prompt_when_browser_is_not_running(self):
+        for browser in ("chrome", "edge"):
+            self.calls = []
+            self.arrange(running=False)
+            result, text = self.offer(browser=browser)
+            self.assertFalse(result, browser)
+            self.assertEqual(text, "", browser)
+            self.assertEqual(self.calls, [])
+
+    def test_no_prompt_for_a_source_that_does_not_lock(self):
+        # "" / firefox / safari never hold the database open the way the two
+        # Chromium browsers do, so they are never offered for closing.
+        self.arrange(running=True)
+        for browser in ("", "firefox", "safari"):
+            result, text = self.offer(browser=browser)
+            self.assertFalse(result, browser)
+            self.assertEqual(text, "", browser)
+        self.assertEqual(self.calls, [])
+
+    def test_yes_closes_chrome(self):
+        self.arrange(running=True)
+        result, text = self.offer(browser="chrome", answer="y")
+        self.assertTrue(result)
+        self.assertEqual(self.calls, ["chrome"])
+        self.assertIn("Chrome 已退出", text)
+
+    def test_yes_closes_edge(self):
+        # The whole point of the request: Edge gets the same treatment as
+        # Chrome, named as Edge rather than mislabelled.
+        self.arrange(running=True)
+        result, text = self.offer(browser="edge", answer="y")
+        self.assertTrue(result)
+        self.assertEqual(self.calls, ["edge"])
+        self.assertIn("Edge 已退出", text)
+        self.assertNotIn("Chrome", text)
+
+    def test_answer_is_case_and_space_tolerant(self):
+        for answer in ("Y", " yes ", "YES", "是"):
+            self.calls = []
+            self.arrange(running=True)
+            result, _ = self.offer(answer=answer)
+            self.assertTrue(result, answer)
+
+    def test_no_leaves_the_browser_alone_but_warns(self):
+        for answer in ("n", "", "no", "随便"):
+            self.calls = []
+            self.arrange(running=True)
+            result, text = self.offer(browser="edge", answer=answer)
+            self.assertFalse(result, answer)
+            self.assertEqual(self.calls, [], answer)
+            self.assertIn("Edge 仍在运行", text)
+
+    def test_failed_quit_is_reported_as_failure(self):
+        self.arrange(running=True, quit_result=False)
+        result, text = self.offer(answer="y")
+        self.assertFalse(result)
+        self.assertIn("没能退出", text)
+
+    def test_interrupted_answer_does_not_kill_anything(self):
+        self.arrange(running=True)
+
+        def refuse(_prompt):
+            raise EOFError
+
+        out = []
+        result = yd.offer_browser_quit_cli("chrome", ask=refuse, out=out.append)
+        self.assertFalse(result)
+        self.assertEqual(self.calls, [])
+
+    def test_question_explains_why_and_what_is_lost(self):
+        # The dialog is the only place this is explained, so it has to carry
+        # the cause, the upstream issue, the cost of saying yes, and the right
+        # browser name.
+        for browser, name in (("chrome", "Chrome"), ("edge", "Edge")):
+            question = yd.browser_quit_question(browser)
+            for fragment in ("cookies", "7271", "未保存", name):
+                self.assertIn(fragment, question, browser)
+
+    def test_process_names_differ_between_chrome_and_edge(self):
+        chrome = yd.browser_process_names("chrome")
+        edge = yd.browser_process_names("edge")
+        for names in (chrome, edge):
+            self.assertTrue(names)
+            self.assertTrue(all(isinstance(name, str) and name for name in names))
+        self.assertNotEqual(chrome, edge, "Chrome and Edge resolved to the same process")
+
+    def test_running_answers_a_bool_without_raising(self):
+        yd._run_quiet = self.originals["_run_quiet"]
+        yd.browser_running = self.originals["browser_running"]
+        for browser in ("chrome", "edge"):
+            self.assertIsInstance(yd.browser_running(browser), bool)
+
+    def test_unknown_process_state_reads_as_not_running(self):
+        # pgrep/tasklist missing must not produce an offer to kill anything.
+        yd.browser_running = self.originals["browser_running"]
+        yd._run_quiet = lambda cmd, timeout=15: None
+        self.assertFalse(yd.browser_running("chrome"))
+        self.assertFalse(yd.browser_running("edge"))
+
+    def test_quit_returns_early_once_the_browser_is_gone(self):
+        yd.quit_browser = self.originals["quit_browser"]
+        issued = []
+        yd._run_quiet = lambda cmd, timeout=15: issued.append(cmd)
+        yd.browser_running = lambda browser: False
+        started = time.monotonic()
+        self.assertTrue(yd.quit_browser("edge", grace=5))
+        # One polite round, then out -- no waiting on the grace period and no
+        # escalation to a forced kill. The round is one request per candidate
+        # process name, which is one on macOS and Windows but three on Linux,
+        # where the same browser ships under several binary names.
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(len(issued), len(yd.browser_process_names("edge")))
+        for cmd in issued:
+            self.assertNotIn("/F", cmd)
+            self.assertNotIn("-9", cmd)
+
+    def test_quit_escalates_only_after_the_grace_period(self):
+        yd.quit_browser = self.originals["quit_browser"]
+        issued = []
+        yd._run_quiet = lambda cmd, timeout=15: issued.append(cmd)
+        yd.browser_running = lambda browser: True  # never goes away
+        self.assertFalse(yd.quit_browser("chrome", grace=0.5))
+        polite = len(yd.browser_process_names("chrome"))
+        self.assertGreater(len(issued), polite, "a stubborn browser was never escalated")
+        forced = " ".join(" ".join(cmd) for cmd in issued[polite:])
+        self.assertTrue("/F" in forced or "-9" in forced)
+
+
+class TestVersion(unittest.TestCase):
+    """The version in the title bar, and the two GUIs agreeing on it.
+
+    The point of showing it at all is that a bug report names a build, which
+    only works while both implementations report the same one.
+    """
+
+    PS1 = ROOT / "standalone" / "windows" / "YouTube-Downloader.ps1"
+
+    def test_version_looks_like_a_version(self):
+        self.assertRegex(yd.VERSION, r"^\d+\.\d+\.\d+$")
+
+    def test_title_bar_carries_the_version_and_the_name(self):
+        self.assertIn(yd.VERSION, yd.APP_TITLE)
+        self.assertIn(yd.APP_NAME, yd.APP_TITLE)
+
+    def test_powershell_gui_shows_the_same_version(self):
+        source = self.PS1.read_text(encoding="utf-8")
+        match = re.search(r'\$form\.Text\s*=\s*"([^"]+)"', source)
+        self.assertIsNotNone(match, "could not find the PowerShell window title")
+        title = match.group(1)
+        self.assertEqual(
+            title, yd.APP_TITLE,
+            "the two GUIs disagree about the title bar; update both or the "
+            "version in a bug report means nothing")
+
+
+class TestWindowsParity(unittest.TestCase):
+    """The PowerShell GUI must carry the startup checks the Python one does.
+
+    Windows is where the locked cookie database and the missing dependencies
+    actually bite, and it is the platform least likely to have a terminal open
+    to work around either. A check that exists only in Python is a check the
+    people who need it most never see.
+    """
+
+    PS1 = ROOT / "standalone" / "windows" / "YouTube-Downloader.ps1"
+    WINDOWS = ROOT / "standalone" / "windows"
+
+    def setUp(self):
+        self.source = self.PS1.read_text(encoding="utf-8")
+
+    def test_browser_is_detected_and_can_be_closed(self):
+        for needed in ("Test-BrowserRunning", "Stop-Browser", "Invoke-BrowserQuitOffer", "7271"):
+            self.assertIn(needed, self.source,
+                          "the PowerShell GUI lost the browser check: " + needed)
+
+    def test_both_chrome_and_edge_are_handled(self):
+        # Edge is the fallback when Chrome refuses, so it must lock-quit too.
+        for token in ("chrome", "edge", "msedge"):
+            self.assertIn(token, self.source,
+                          "the PowerShell GUI does not handle " + token)
+
+    def test_cookies_file_is_wired_the_same_way(self):
+        # The file source (yt-dlp #10927 workaround) has to exist in the
+        # PowerShell builders too, or -PrintCommand parity would diverge.
+        for token in ("--cookies", "CookiesFile", "OpenFileDialog", "10927"):
+            self.assertIn(token, self.source,
+                          "the PowerShell GUI is missing the cookies file path: " + token)
+
+    def test_browser_is_asked_about_politely_before_being_forced(self):
+        # CloseMainWindow before taskkill /F: the reverse loses unsaved tabs
+        # without ever asking the browser to close itself.
+        self.assertLess(self.source.index("CloseMainWindow"),
+                        self.source.index("taskkill.exe /IM"))
+
+    def test_startup_offers_whatever_is_missing(self):
+        shown = self.source.index("$form.Add_Shown")
+        handler = self.source[shown:]
+        for needed in ("Find-Executable", "Resolve-FfmpegDirectory", "缺少依赖"):
+            self.assertIn(needed, handler,
+                          "startup stopped checking for " + needed)
+
+    def test_one_entry_point_and_the_old_names_forward_to_it(self):
+        entry = self.WINDOWS / "YouTube-Downloader.bat"
+        self.assertTrue(entry.is_file(), "the single entry point is missing")
+        self.assertIn("YouTube-Downloader.ps1", entry.read_text(encoding="utf-8"))
+        for old in ("Run-Downloader.bat", "Install-and-Run.bat"):
+            text = (self.WINDOWS / old).read_text(encoding="utf-8")
+            self.assertIn("YouTube-Downloader.bat", text,
+                          "{} no longer forwards to the one entry".format(old))
 
 
 class TestToolDiscovery(unittest.TestCase):

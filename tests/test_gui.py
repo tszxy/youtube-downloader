@@ -12,7 +12,9 @@ Two things make it work outside a real desktop session:
 Skipped automatically when there is no display or no tkinter.
 """
 
+import faulthandler
 import importlib.util
+import os
 import tempfile
 import threading
 import time
@@ -24,7 +26,7 @@ APP = ROOT / "standalone" / "youtube_downloader.py"
 
 try:
     import tkinter
-    from tkinter import messagebox
+    from tkinter import filedialog, messagebox
     _probe = tkinter.Tk()
     _probe.withdraw()
     _probe.update()
@@ -32,6 +34,16 @@ try:
     DISPLAY = True
 except Exception:  # noqa: BLE001 - any failure means we cannot open a window
     DISPLAY = False
+
+
+# A blocked Tk call does not return to Python, so no timeout written in Python
+# can end it: unittest cannot fail the test, KeyboardInterrupt cannot reach it,
+# and the run sits there until the CI job's own limit kills the whole machine
+# 15 minutes later with no output at all. faulthandler runs on its own thread
+# and writes straight to the stderr file descriptor, so it is the one thing
+# that still works -- it names the hung test and every thread's stack.
+# Generous on purpose: the slowest test here waits up to 10s for a download.
+HANG_TIMEOUT = float(os.environ.get("GUI_TEST_HANG_TIMEOUT", "60"))
 
 
 def load_app():
@@ -62,18 +74,64 @@ def snapshot(widget, out):
 @unittest.skipUnless(DISPLAY, "no display or tkinter available")
 class TestGuiBuilds(unittest.TestCase):
     def setUp(self):
+        faulthandler.dump_traceback_later(HANG_TIMEOUT, exit=True)
         self.yd = load_app()
         self.widgets = []
+        self.window_title = ""
         self.warnings = []
+        self.asked = []
+        self.answers = []
+        self.quit_calls = []
+        self.cookies_path = ""
         self._mainloop = tkinter.Tk.mainloop
         self._showwarning = messagebox.showwarning
+        self._askyesno = messagebox.askyesno
+        self._askopenfilename = filedialog.askopenfilename
+        # The cookies-file picker must never open a real file dialog; it returns
+        # whatever a test set, or "" (a cancelled pick) by default.
+        filedialog.askopenfilename = lambda *a, **k: self.cookies_path
         messagebox.showwarning = lambda *a, **k: self.warnings.append(a)
+        # Unstubbed, the startup Chrome question opens a real modal dialog and
+        # the suite hangs waiting for a human -- but only on a machine slow
+        # enough for the 300ms timer to fire mid-pump, so it would look flaky
+        # rather than broken.
+        messagebox.askyesno = self._answer
+        # No test may consult, let alone close, a real browser.
+        self.yd.browser_running = lambda browser: False
+        self.yd.quit_browser = lambda browser, *a, **k: (self.quit_calls.append(browser), True)[1]
+        # Which browsers are installed decides which radios are enabled, and
+        # nothing here is about that. Left real, the browser tests pass on a
+        # developer's machine and fail on a runner with no browser installed:
+        # the radio is greyed out, and a greyed-out radio eats the click.
+        # test_a_browser_that_is_not_installed_is_greyed_out covers the
+        # real function on purpose.
+        self.yd.browser_available = lambda name: True
+        # Present by default, so the startup dependency offer stays out of the
+        # way. Left real, a machine without ffmpeg would eat the answer queued
+        # for the Chrome question and fail unrelated tests.
+        self.yd.find_runner = lambda: ["yt-dlp"]
+        self.yd.ffmpeg_available = lambda: True
+
+    def _answer(self, *args, **kwargs):
+        self.asked.append(args)
+        return self.answers.pop(0) if self.answers else False
 
     def tearDown(self):
+        faulthandler.cancel_dump_traceback_later()
         tkinter.Tk.mainloop = self._mainloop
         messagebox.showwarning = self._showwarning
+        messagebox.askyesno = self._askyesno
+        filedialog.askopenfilename = self._askopenfilename
 
-    def pump(self, action=None, cycles=10):
+    def pump(self, action=None, cycles=10, settle_cycles=None):
+        """Build the window, run `action` against it, and snapshot it.
+
+        settle_cycles is how hard to pump *after* the action, and exists
+        because update() is not always safe to call: see select().
+        """
+        if settle_cycles is None:
+            settle_cycles = cycles
+
         def fake_mainloop(root):
             try:
                 root.withdraw()
@@ -81,8 +139,12 @@ class TestGuiBuilds(unittest.TestCase):
                     root.update()
                 if action is not None:
                     action(root)
-                    for _ in range(cycles):
+                    for _ in range(settle_cycles):
                         root.update()
+                # Read off the live window, like every other snapshot here:
+                # asserting on the constant would not catch it never reaching
+                # the title bar.
+                self.window_title = root.title()
                 self.widgets = snapshot(root, [])
             finally:
                 # Always, even if action blew up: a window left alive with
@@ -123,17 +185,40 @@ class TestGuiBuilds(unittest.TestCase):
             return None
         return visit(root)
 
-    @staticmethod
-    def click(root, label):
+    def click(self, root, label):
+        """Press the control carrying this label, or fail saying why not.
+
+        invoke() on a disabled ttk widget returns without running the command
+        and without complaining, so a test that clicks a greyed-out control
+        asserts nothing at all. That is not hypothetical: four browser tests
+        passed here and failed on a runner with no browser installed, where
+        the radios are greyed out for real.
+        """
+        found = []
+
         def visit(widget):
             try:
-                if widget.cget("text") == label:
-                    widget.invoke()
+                # Labels and group frames carry text too; only a widget that
+                # can be pressed is a candidate, and the walk continues past
+                # the rest.
+                if widget.cget("text") == label and hasattr(widget, "invoke"):
+                    found.append(widget)
                     return True
-            except Exception:  # noqa: BLE001 - not a button
+            except Exception:  # noqa: BLE001 - widget has no text
                 pass
             return any(visit(child) for child in widget.winfo_children())
-        return visit(root)
+
+        visit(root)
+        if not found:
+            self.fail("no control labelled {!r} to click".format(label))
+        widget = found[0]
+        try:
+            state = str(widget.cget("state"))
+        except Exception:  # noqa: BLE001 - no state option means always enabled
+            state = "normal"
+        if state == "disabled":
+            self.fail("{!r} is greyed out, so clicking it would do nothing".format(label))
+        widget.invoke()
 
     def test_window_builds_with_every_control(self):
         self.pump()
@@ -291,10 +376,83 @@ class TestGuiBuilds(unittest.TestCase):
         self.assertTrue(captured.get("finished"), "run_download was never reached")
         self.assertEqual(captured["url"], "https://youtu.be/ID")
         self.assertEqual(captured["kwargs"]["output_dir"], out_dir)
-        for key in ("mode", "quality", "playlist", "cookies_browser"):
+        for key in ("mode", "quality", "playlist", "cookies_browser", "cookies_file"):
             self.assertIn(key, captured["kwargs"], "widget value never made it through")
         self.assertEqual(captured["kwargs"]["mode"], "video")
         self.assertEqual(captured["kwargs"]["quality"], "best")
+
+    def download_with(self, action_before_start):
+        """Fill a URL and folder, run action_before_start, then 开始下载.
+
+        Returns the kwargs run_download was called with. No real subprocess:
+        run_download is replaced by a capturing stub, same as the delegation
+        test above.
+        """
+        done = threading.Event()
+        captured = {}
+
+        def fake_run_download(url, **kwargs):
+            captured.update(kwargs)
+            done.set()
+            return 0
+
+        self.yd.run_download = fake_run_download
+        out_dir = tempfile.mkdtemp()
+
+        def entries_of(widget, out):
+            if widget.winfo_class() in ("TEntry", "Entry"):
+                out.append(widget)
+            for child in widget.winfo_children():
+                entries_of(child, out)
+            return out
+
+        def action(root):
+            entries = entries_of(root, [])
+            if len(entries) < 2:
+                return
+            entries[0].insert(0, "https://youtu.be/ID")
+            entries[1].delete(0, "end")
+            entries[1].insert(0, out_dir)
+            action_before_start(root)
+            self.click(root, "开始下载")
+            captured["finished"] = done.wait(10)
+
+        self.pump(action=action)
+        self.assertTrue(captured.get("finished"), "run_download was never reached")
+        return captured
+
+    def test_a_chosen_cookies_file_reaches_the_download(self):
+        # The whole point of the file source: what the picker returns is what
+        # yt-dlp is told to read, with no browser cookies alongside it.
+        self.cookies_path = "/tmp/exported_cookies.txt"
+        captured = self.download_with(lambda root: self.click(root, "或用 cookies 文件…"))
+        self.assertEqual(captured["cookies_file"], "/tmp/exported_cookies.txt")
+        self.assertEqual(captured["cookies_browser"], "",
+                         "a browser source was sent alongside the file")
+
+    def test_picking_a_browser_clears_a_chosen_cookies_file(self):
+        # Mutually exclusive: choosing Chrome after a file must drop the file,
+        # or build_command would refuse the two-source command.
+        self.cookies_path = "/tmp/exported_cookies.txt"
+
+        def before(root):
+            self.click(root, "或用 cookies 文件…")  # pick the file first
+            self.click(root, "Chrome")               # then switch to a browser
+
+        captured = self.download_with(before)
+        self.assertEqual(captured["cookies_browser"], "chrome")
+        self.assertEqual(captured["cookies_file"], "",
+                         "the file lingered after a browser was chosen")
+
+    def test_clearing_the_cookies_file_removes_it(self):
+        self.cookies_path = "/tmp/exported_cookies.txt"
+
+        def before(root):
+            self.click(root, "或用 cookies 文件…")
+            self.click(root, "清除")
+
+        captured = self.download_with(before)
+        self.assertEqual(captured["cookies_file"], "")
 
     def run_ticked(self, extra_labels, exit_codes, timeout=10):
         """Tick more download types, press 开始下载, and report the modes run.
@@ -358,6 +516,137 @@ class TestGuiBuilds(unittest.TestCase):
         modes = self.run_ticked(["视频（MP4）"], [0], timeout=0.5)
         self.assertEqual(modes, [])
         self.assertTrue(self.warnings, "no warning was shown for an empty selection")
+
+    # --- the offer to close the chosen login-source browser ----------------
+    #
+    # The question follows the radio, not startup: it is asked inline from the
+    # selection handler. What runs late is the quitting itself, on a worker
+    # thread so the window that asked stays responsive, which is what settle()
+    # waits for.
+
+    def settle(self, predicate, timeout=2.0):
+        """Wait for the quit worker, which runs off the Tk thread."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def select(self, label):
+        """Click a login-source radio by its label. Nothing is pumped after.
+
+        The click carries the whole question: offer_browser_quit runs inline
+        from the radio's command, so by the time click() returns the dialog
+        has been answered and only the quitting is still outstanding -- and
+        that runs on a worker thread, which settle() waits for without Tk.
+
+        Pumping anyway is not merely unnecessary, it hangs. On the macOS CI
+        runner update() never returns once this dialog has been answered, and
+        a blocked Tk call cannot be interrupted from Python, so the job sat
+        there until it was killed 15 minutes later. It does not reproduce on
+        a desktop macOS session under Tk 8.5 or 9.0, so the cause is
+        something about that runner rather than anything the window does.
+        Nothing here needs those events delivered, so they are not asked for.
+        The app itself is unaffected: it runs a real mainloop and never calls
+        update().
+        """
+        self.pump(action=lambda root: self.click(root, label), settle_cycles=0)
+
+    def test_selecting_chrome_offers_to_close_it(self):
+        self.yd.browser_running = lambda browser: browser == "chrome"
+        self.answers.append(True)
+        self.select("Chrome")
+        self.assertTrue(self.asked, "picking Chrome never offered to close it")
+        self.assertTrue(self.settle(lambda: self.quit_calls == ["chrome"]),
+                        "the user said yes and Chrome was left running")
+
+    def test_selecting_edge_offers_to_close_edge(self):
+        # The point of this change: Edge is a first-class fallback, closed and
+        # named as Edge rather than mislabelled Chrome.
+        self.yd.browser_running = lambda browser: browser == "edge"
+        self.answers.append(True)
+        self.select("Edge")
+        self.assertTrue(self.asked, "picking Edge never offered to close it")
+        dialog = " ".join(str(a) for a in self.asked[0])
+        self.assertIn("Edge", dialog)
+        self.assertNotIn("Chrome", dialog)
+        self.assertTrue(self.settle(lambda: self.quit_calls == ["edge"]))
+
+    def test_declining_leaves_the_browser_running(self):
+        self.yd.browser_running = lambda browser: True
+        self.answers.append(False)
+        self.select("Chrome")
+        self.assertTrue(self.asked)
+        self.assertFalse(self.quit_calls, "the browser was closed despite a no")
+
+    def test_a_source_that_is_not_running_is_not_offered(self):
+        self.yd.browser_running = lambda browser: False
+        self.select("Chrome")
+        self.assertFalse(self.asked, "offered to close a browser that was not running")
+        self.assertFalse(self.quit_calls)
+
+    def test_a_non_locking_source_is_never_offered(self):
+        # Firefox does not hold its cookie database open, so selecting it must
+        # not pop the quit dialog even if a "browser" appears to be running.
+        self.yd.browser_running = lambda browser: True
+        self.select("Firefox")
+        self.assertFalse(self.asked, "offered to close Firefox, which never locks")
+        self.assertFalse(self.quit_calls)
+
+    def test_a_browser_that_is_not_installed_is_greyed_out(self):
+        # The one test that is about browser_available itself, so the setUp
+        # stub is replaced rather than left alone: a login source with no
+        # profile on disk has no cookies to give and must not be offerable.
+        self.yd.browser_available = lambda name: name != "chrome"
+        self.pump()
+        states = self.states()
+        self.assertEqual(states["Chrome"], "disabled", "an uninstalled Chrome was offered")
+        self.assertEqual(states["Firefox"], "normal", "an installed browser was greyed out")
+
+    # --- the startup dependency check -------------------------------------
+
+    def test_missing_dependencies_are_offered_for_installing(self):
+        self.yd.find_runner = lambda: None
+        self.yd.ffmpeg_available = lambda: False
+        self.answers.append(False)  # decline, so no installer actually runs
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertTrue(self.asked, "nothing was offered for a missing yt-dlp")
+        offered = " ".join(str(a) for a in self.asked[0])
+        self.assertIn("yt-dlp", offered)
+        self.assertIn("FFmpeg", offered)
+
+    def test_a_complete_install_is_not_nagged(self):
+        self.yd.find_runner = lambda: ["yt-dlp"]
+        self.yd.ffmpeg_available = lambda: True
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertFalse(self.asked, "asked about dependencies that were present")
+
+    def test_only_the_missing_half_is_named(self):
+        # ffmpeg alone missing: naming yt-dlp too would send people looking for
+        # a problem they do not have.
+        self.yd.find_runner = lambda: ["yt-dlp"]
+        self.yd.ffmpeg_available = lambda: False
+        self.answers.append(False)
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertTrue(self.asked)
+        offered = " ".join(str(a) for a in self.asked[0])
+        self.assertIn("FFmpeg", offered)
+        self.assertNotIn("yt-dlp", offered)
+
+    def test_title_bar_shows_the_version(self):
+        self.pump()
+        self.assertIn(self.yd.VERSION, self.window_title)
+        self.assertIn(self.yd.APP_NAME, self.window_title)
+
+    def test_startup_alone_asks_nothing_about_browsers(self):
+        # The browser question is now tied to selecting a login source, not to
+        # startup. With dependencies present and nothing selected, opening the
+        # window must pop no dialog at all -- even if a browser is running.
+        self.yd.browser_running = lambda browser: True
+        self.pump(action=lambda root: time.sleep(0.4))
+        self.assertFalse(self.asked, "startup popped a browser question on its own")
+        self.assertFalse(self.quit_calls)
 
 
 if __name__ == "__main__":
